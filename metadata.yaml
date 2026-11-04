@@ -1,0 +1,29 @@
+name: astrbot_plugin_groupscope
+display_name: GroupScope 群聊观察与数字档案
+short_desc: 长期、可靠地记录群聊原始消息，为人物关系与群体记忆分析打基础。
+desc: |
+  GroupScope（群聊观察与数字档案系统）以长期数据积累为核心：
+  - 可靠保存群聊原始消息与完整消息段结构（去重、分页、备份、恢复、导出）
+  - 原始档案与 AI 分析结果分离，分析结论保留消息证据
+  - 群聊白名单采集、支持停止采集与数据删除，WebUI 复用 AstrBot Dashboard 鉴权
+  - 后续版本提供人物档案、称呼识别、群体记忆与关系图谱可视化。
+version: 0.1.0
+author: GroupScope
+repo: https://github.com/astrbot_plugin_groupscope
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - lark
+  - slack
+  - kook
+  - satori
+  - misskey
+  - line
+  - mattermost
+tags:
+  - 群聊档案
+  - 消息记录
+  - 数据分析

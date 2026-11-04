@@ -1,0 +1,21 @@
+# 依赖环境
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 运行期数据（插件自身数据目录，绝不入库）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 备份与导出产物
+backups/
+exports/
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store

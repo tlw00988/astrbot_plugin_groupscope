@@ -1,0 +1,2 @@
+# aiosqlite 已随 AstrBot 主程序安装，此处显式声明以保证插件独立可安装。
+aiosqlite>=0.21.0

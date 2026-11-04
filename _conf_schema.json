@@ -1,0 +1,89 @@
+{
+  "capture_enabled": {
+    "description": "总开关：是否采集消息",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后插件立即停止记录新消息，历史数据保留。"
+  },
+  "group_whitelist": {
+    "description": "采集群白名单",
+    "type": "list",
+    "default": [],
+    "hint": "只采集白名单内的群。格式：平台名:群ID（如 aiocqhttp:123456789）或仅群ID（匹配所有平台）。留空表示不采集任何群。",
+    "obvious_hint": true
+  },
+  "group_blacklist": {
+    "description": "采集黑名单",
+    "type": "list",
+    "default": [],
+    "hint": "黑名单优先于白名单，格式同白名单。"
+  },
+  "excluded_users": {
+    "description": "排除的发送者",
+    "type": "list",
+    "default": [],
+    "hint": "这些用户的消息不会被记录。格式：平台名:用户ID 或 仅用户ID。"
+  },
+  "record_notices": {
+    "description": "记录可观测通知事件",
+    "type": "bool",
+    "default": true,
+    "hint": "平台支持时记录撤回、戳一戳等通知事件（仅保存平台可观测内容，不做推断）。"
+  },
+  "attachment_policy": {
+    "description": "附件保存策略",
+    "type": "string",
+    "options": ["none", "metadata_only", "download_if_small"],
+    "labels": ["不记录", "仅记录元数据", "小文件下载"],
+    "default": "metadata_only",
+    "hint": "默认只保存图片/文件的元数据（URL、文件名等），不下载内容。"
+  },
+  "attachment_max_bytes": {
+    "description": "download_if_small 的大小上限",
+    "type": "int",
+    "default": 2097152,
+    "hint": "单位字节，默认 2MB。仅当附件策略为 download_if_small 时生效。"
+  },
+  "batch_max_rows": {
+    "description": "写库批量行数阈值",
+    "type": "int",
+    "default": 100,
+    "hint": "达到该条数立即写入一批，减少事务次数。"
+  },
+  "batch_max_interval_ms": {
+    "description": "写库批量时间阈值(ms)",
+    "type": "int",
+    "default": 500,
+    "hint": "最多等待该时间后写入一批，保证低流量时的及时性。"
+  },
+  "queue_maxsize": {
+    "description": "内存队列上限",
+    "type": "int",
+    "default": 10000,
+    "hint": "队列满时丢弃新消息并计数（绝不阻塞消息主流程）。"
+  },
+  "log_retention_days": {
+    "description": "原始消息保留天数",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示永久保留。设置后超过保留期的消息及其段、@ 记录会被定期清除。"
+  },
+  "backup_auto": {
+    "description": "自动每日备份",
+    "type": "bool",
+    "default": false,
+    "hint": "每天生成一次数据库备份到 backups/ 目录。"
+  },
+  "backup_keep": {
+    "description": "保留备份数量",
+    "type": "int",
+    "default": 7,
+    "hint": "超过数量的最旧备份会被自动删除。"
+  },
+  "log_detail": {
+    "description": "采集过程输出详细日志",
+    "type": "bool",
+    "default": false,
+    "hint": "排障用，正常运行建议关闭以免日志膨胀。"
+  }
+}
