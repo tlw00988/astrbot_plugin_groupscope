@@ -62,16 +62,23 @@ class TaskQueue:
         return True
 
     async def claim(self, kind: str | None = None, limit: int = 1) -> list[dict[str, Any]]:
-        """认领待处理任务（pending → running）。"""
+        """认领待处理任务（pending → running）。``kind=None`` 表示任意类型。"""
+        kinds = (kind,) if kind else None
+        return await self.claim_kinds(kinds, limit=limit)
+
+    async def claim_kinds(
+        self, kinds: tuple[str, ...] | None, limit: int = 1
+    ) -> list[dict[str, Any]]:
+        """认领指定类型（或任意类型）的待处理任务，按优先级、创建时间排序。"""
         claimed: list[dict[str, Any]] = []
         now = int(time.time())
         for _ in range(max(1, limit)):
-            sql = (
-                "SELECT id FROM analysis_tasks WHERE status=?"
-                + (" AND kind=?" if kind else "")
-                + " ORDER BY priority DESC, created_at ASC LIMIT 1"
-            )
-            params: list[Any] = [STATUS_PENDING] + ([kind] if kind else [])
+            sql = "SELECT id FROM analysis_tasks WHERE status=?"
+            params: list[Any] = [STATUS_PENDING]
+            if kinds:
+                sql += " AND kind IN (" + ",".join("?" for _ in kinds) + ")"
+                params.extend(kinds)
+            sql += " ORDER BY priority DESC, created_at ASC LIMIT 1"
             cur = await self.conn.execute(sql, params)
             row = await cur.fetchone()
             if row is None:

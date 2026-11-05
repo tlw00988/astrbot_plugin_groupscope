@@ -34,6 +34,15 @@ from .groupscope.storage.db import Database
 
 ADMIN = filter.PermissionType.ADMIN
 
+_KIND_LABELS = {
+    analysis_runner_mod.KIND_RULE: "规则称呼",
+    analysis_runner_mod.KIND_LLM: "LLM称呼",
+    analysis_runner_mod.KIND_TOPIC_RULE: "规则话题",
+    analysis_runner_mod.KIND_TOPIC_LLM: "LLM话题",
+    analysis_runner_mod.KIND_EVENT_RULE: "规则事件",
+    analysis_runner_mod.KIND_EVENT_LLM: "LLM事件",
+}
+
 
 def _fmt_time(ts: int | None) -> str:
     if not ts:
@@ -729,26 +738,60 @@ class Main(Star):
             return
         args = self._args(event)
         if not args:
-            yield event.plain_result("用法: /gs analyze <群ID> [rule|llm|all]")
+            yield event.plain_result("用法: /gs analyze <群ID> [rule|llm|topic|event|all]")
             return
         row = await self._find_group(args[0])
         if not row:
             yield event.plain_result(f"未找到群: {args[0]}")
             return
         mode = args[1] if len(args) > 1 else "all"
-        if mode not in ("rule", "llm", "all"):
-            yield event.plain_result("第二参数只能是 rule / llm / all")
+        if mode not in ("rule", "llm", "all", "topic", "event"):
+            yield event.plain_result("第二参数只能是 rule / llm / all / topic / event")
             return
         group_ref = int(row["id"])
         enqueued = []
         if mode in ("rule", "all"):
             if await self.runner.enqueue_rule(group_ref, priority=10):
-                enqueued.append("规则")
+                enqueued.append("规则称呼")
+        if mode in ("topic", "all"):
+            enqueued += [
+                _KIND_LABELS.get(k, k)
+                for k in await self.runner.enqueue_memory(
+                    group_ref, kinds=(analysis_runner_mod.KIND_TOPIC_RULE,), priority=10
+                )
+            ]
+            if self.gateway is not None:
+                enqueued += [
+                    _KIND_LABELS.get(k, k)
+                    for k in await self.runner.enqueue_memory(
+                        group_ref,
+                        kinds=(analysis_runner_mod.KIND_TOPIC_LLM,),
+                        priority=10,
+                        with_llm=True,
+                    )
+                ]
+        if mode in ("event", "all"):
+            enqueued += [
+                _KIND_LABELS.get(k, k)
+                for k in await self.runner.enqueue_memory(
+                    group_ref, kinds=(analysis_runner_mod.KIND_EVENT_RULE,), priority=10
+                )
+            ]
+            if self.gateway is not None:
+                enqueued += [
+                    _KIND_LABELS.get(k, k)
+                    for k in await self.runner.enqueue_memory(
+                        group_ref,
+                        kinds=(analysis_runner_mod.KIND_EVENT_LLM,),
+                        priority=10,
+                        with_llm=True,
+                    )
+                ]
         if mode in ("llm", "all"):
             if self.gateway is None:
                 enqueued.append("LLM(未启用/无Provider)")
             elif await self.runner.enqueue_llm(group_ref, priority=10):
-                enqueued.append("LLM")
+                enqueued.append("LLM称呼")
         if not enqueued:
             yield event.plain_result("该范围的分析任务已存在（或未入队）。")
             return
@@ -809,19 +852,20 @@ class Main(Star):
             return
         args = self._args(event)
         if not args:
-            yield event.plain_result("用法: /gs reanalyze <群ID> [rule|llm|all]")
+            yield event.plain_result("用法: /gs reanalyze <群ID> [rule|llm|topic|event|all]")
             return
         row = await self._find_group(args[0])
         if not row:
             yield event.plain_result(f"未找到群: {args[0]}")
             return
         mode = args[1] if len(args) > 1 else "all"
-        if mode not in ("rule", "llm", "all"):
-            yield event.plain_result("第二参数只能是 rule / llm / all")
+        if mode not in ("rule", "llm", "all", "topic", "event"):
+            yield event.plain_result("第二参数只能是 rule / llm / all / topic / event")
             return
         group_ref = int(row["id"])
         store = AddressingStore(self.db.conn)
         purged = 0
+        purged_t = purged_e = 0
         if mode in ("llm", "all"):
             try:
                 purged = await store.purge(group_ref=group_ref)
@@ -831,18 +875,68 @@ class Main(Star):
                 self.logger.exception("清理旧结论失败")
                 yield event.plain_result(f"清理失败: {e}")
                 return
+        if mode in ("topic", "all", "event"):
+            from .groupscope.memory.store import MemoryStore
+
+            try:
+                if mode in ("topic", "all"):
+                    purged_t, _ = await MemoryStore(self.db.conn).purge(
+                        group_ref=group_ref, source="llm"
+                    )
+                if mode in ("event", "all"):
+                    _, purged_e = await MemoryStore(self.db.conn).purge(
+                        group_ref=group_ref, source="llm"
+                    )
+                for k in (
+                    analysis_runner_mod.KIND_TOPIC_RULE,
+                    analysis_runner_mod.KIND_TOPIC_LLM,
+                    analysis_runner_mod.KIND_EVENT_RULE,
+                    analysis_runner_mod.KIND_EVENT_LLM,
+                ):
+                    await self.runner.queue.clear(k, status=("done", "failed", "pending"))
+            except Exception as e:
+                self.logger.exception("清理话题/事件失败")
+                yield event.plain_result(f"清理失败: {e}")
+                return
         enqueued = []
         if mode in ("rule", "all"):
             await self.runner.enqueue_rule(group_ref, priority=10)
-            enqueued.append("规则")
+            enqueued.append("规则称呼")
+        if mode in ("topic", "all"):
+            await self.runner.enqueue_memory(
+                group_ref, kinds=(analysis_runner_mod.KIND_TOPIC_RULE,), priority=10
+            )
+            enqueued.append("规则话题")
+            if self.gateway is not None:
+                await self.runner.enqueue_memory(
+                    group_ref,
+                    kinds=(analysis_runner_mod.KIND_TOPIC_LLM,),
+                    priority=10,
+                    with_llm=True,
+                )
+                enqueued.append("LLM话题")
+        if mode in ("event", "all"):
+            await self.runner.enqueue_memory(
+                group_ref, kinds=(analysis_runner_mod.KIND_EVENT_RULE,), priority=10
+            )
+            enqueued.append("规则事件")
+            if self.gateway is not None:
+                await self.runner.enqueue_memory(
+                    group_ref,
+                    kinds=(analysis_runner_mod.KIND_EVENT_LLM,),
+                    priority=10,
+                    with_llm=True,
+                )
+                enqueued.append("LLM事件")
         if mode in ("llm", "all"):
             if self.gateway is None:
-                enqueued.append("LLM(未启用)")
+                enqueued.append("LLM称呼(未启用)")
             else:
                 await self.runner.enqueue_llm(group_ref, priority=10)
-                enqueued.append("LLM")
+                enqueued.append("LLM称呼")
         yield event.plain_result(
-            f"已清除 AI 称呼结论 {purged} 条，重新入队：{'、'.join(enqueued)}。"
+            f"已清除旧结论：称呼 {purged}、话题 {purged_t}、事件 {purged_e} 条；"
+            f"重新入队：{'、'.join(enqueued)}。"
             f"\n提示词版本: {self._prompt_version()}"
         )
 
@@ -897,6 +991,193 @@ class Main(Star):
         from .groupscope.analysis.prompts import PROMPTS
 
         return "/".join(spec["version"] for spec in PROMPTS.values())
+
+    # ------------------------------------------------------------------
+    # Phase 4：群体记忆
+    # ------------------------------------------------------------------
+
+    @gs.command("topics")
+    @filter.permission_type(ADMIN)
+    async def gs_topics(self, event: AstrMessageEvent):
+        """话题列表：/gs topics [群ID] [条数]"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        group_ref = None
+        limit = 10
+        for a in args:
+            if a.isdigit():
+                limit = min(int(a), 30)
+            else:
+                row = await self._find_group(a)
+                if not row:
+                    yield event.plain_result(f"未找到群: {a}")
+                    return
+                group_ref = row["id"]
+        from .groupscope.memory.store import MemoryStore
+
+        store = MemoryStore(self.db.conn)
+        rows = await store.list_topics(group_ref, limit=limit)
+        if not rows:
+            yield event.plain_result(
+                "暂无话题记录。可用 /gs analyze <群ID> topic 触发抽取。"
+            )
+            return
+        lines = ["【群体话题】（关键词统计 + AI 归纳，均为推断）"]
+        for r in rows:
+            src = "规则" if r["source"] == "rule" else "AI"
+            lines.append(
+                f"#{r['id']} {r['title']} [{src}] 置信 {r['confidence']:.2f}"
+                f" | 提及 {r['mention_count']} 次 | 证据 {r['evidence']} 条"
+            )
+            if r.get("summary"):
+                lines.append(f"   {r['summary']}")
+            lines.append(
+                f"   首见 {_fmt_time(r['first_seen'])} → 最近 {_fmt_time(r['last_seen'])}"
+                + (f" | 关键词: {'、'.join(r['keywords'][:6])}" if r.get("keywords") else "")
+            )
+        lines.append("用 /gs topic 1 <话题ID> 查看证据消息。")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("topic")
+    @filter.permission_type(ADMIN)
+    async def gs_topic(self, event: AstrMessageEvent):
+        """话题证据：/gs topic 1 <话题ID>"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if len(args) < 2 or not args[1].isdigit():
+            yield event.plain_result("用法: /gs topic 1 <话题ID>（ID 从 /gs topics 获取）")
+            return
+        from .groupscope.memory.store import MemoryStore
+
+        store = MemoryStore(self.db.conn)
+        evidence = await store.topic_evidence(int(args[1]), limit=8)
+        if not evidence:
+            yield event.plain_result("该话题没有可回溯的证据消息。")
+            return
+        lines = [f"【话题 #{args[1]} 的证据消息】"]
+        for m in evidence:
+            text = (m["text"] or "").replace("\n", " ")[:50]
+            lines.append(
+                f"#{m['id']} {_fmt_time(m['sent_at'])}"
+                f"[{m['sender_raw_name'] or m['sender_raw_id'] or '?'}] {text}"
+            )
+        lines.append("（证据可回溯到原始消息，推断不等于事实）")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("events")
+    @filter.permission_type(ADMIN)
+    async def gs_events(self, event: AstrMessageEvent):
+        """事件/梗列表：/gs events [群ID] [meme|event|dispute|routine]"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        group_ref = None
+        kind = None
+        for a in args:
+            if a in ("meme", "event", "dispute", "routine"):
+                kind = a
+            else:
+                row = await self._find_group(a)
+                if not row:
+                    yield event.plain_result(f"未找到群: {a}")
+                    return
+                group_ref = row["id"]
+        from .groupscope.memory.store import MemoryStore
+
+        store = MemoryStore(self.db.conn)
+        rows = await store.list_events(group_ref, event_kind=kind, limit=15)
+        if not rows:
+            yield event.plain_result(
+                "暂无事件/梗记录。可用 /gs analyze <群ID> event 触发抽取。"
+            )
+            return
+        kind_labels = {"meme": "梗", "event": "事件", "dispute": "争议", "routine": "日常"}
+        lines = ["【群体事件 / 梗】（首现→传播→演变，均为推断）"]
+        for r in rows:
+            src = "规则" if r["source"] == "rule" else "AI"
+            lines.append(
+                f"#{r['id']} {r['title']} [{kind_labels.get(r['event_kind'], r['event_kind'])}]"
+                f" [{src}] 置信 {r['confidence']:.2f}"
+                f" | 出现 {r['mention_count']} 次 | 证据 {r['evidence']} 条"
+            )
+            if r.get("summary"):
+                lines.append(f"   {r['summary']}")
+            lines.append(
+                f"   首现 {_fmt_time(r['first_seen'])} → 最近 {_fmt_time(r['last_seen'])}"
+                + (f" | 峰值 {_fmt_time(r['peak_at'])}" if r.get("peak_at") else "")
+            )
+        lines.append("用 /gs event 1 <事件ID> 查看首现/传播证据。")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("event")
+    @filter.permission_type(ADMIN)
+    async def gs_event(self, event: AstrMessageEvent):
+        """事件证据：/gs event 1 <事件ID>"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if len(args) < 2 or not args[1].isdigit():
+            yield event.plain_result("用法: /gs event 1 <事件ID>（ID 从 /gs events 获取）")
+            return
+        from .groupscope.memory.store import MemoryStore
+
+        store = MemoryStore(self.db.conn)
+        evidence = await store.event_evidence(int(args[1]), limit=8)
+        if not evidence:
+            yield event.plain_result("该事件没有可回溯的证据消息。")
+            return
+        role_labels = {"origin": "首现", "spread": "传播", "evolve": "演变"}
+        lines = [f"【事件 #{args[1]} 的证据链】"]
+        for m in evidence:
+            text = (m["text"] or "").replace("\n", " ")[:50]
+            lines.append(
+                f"[{role_labels.get(m['role'], m['role'])}] #{m['id']}"
+                f" {_fmt_time(m['sent_at'])}"
+                f"[{m['sender_raw_name'] or m['sender_raw_id'] or '?'}] {text}"
+            )
+        lines.append("（证据可回溯到原始消息，推断不等于事实）")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("timeline")
+    @filter.permission_type(ADMIN)
+    async def gs_timeline(self, event: AstrMessageEvent):
+        """群体记忆时间线：/gs timeline [群ID] [条数]"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        group_ref = None
+        limit = 20
+        for a in args:
+            if a.isdigit():
+                limit = min(int(a), 50)
+            else:
+                row = await self._find_group(a)
+                if not row:
+                    yield event.plain_result(f"未找到群: {a}")
+                    return
+                group_ref = row["id"]
+        from .groupscope.memory.store import MemoryStore
+
+        store = MemoryStore(self.db.conn)
+        rows = await store.timeline(group_ref, limit=limit)
+        if not rows:
+            yield event.plain_result("暂无时间线（需要先产生话题/事件）。")
+            return
+        lines = ["【群体记忆时间线】（新→旧）"]
+        for r in rows:
+            mark = "📌" if r["item_kind"] == "topic" else "🔥"
+            lines.append(
+                f"{_fmt_time(r['occurred_at'])} {mark} {r['label']}"
+                + (f" — {r['detail']}" if r.get("detail") else "")
+            )
+        yield event.plain_result("\n".join(lines))
 
     @gs.command("reload")
     @filter.permission_type(ADMIN)

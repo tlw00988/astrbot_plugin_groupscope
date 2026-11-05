@@ -14,6 +14,8 @@ import json
 import time
 from typing import Any
 
+from ..memory.rules import MemMessage, extract_events, extract_topics
+from ..memory.store import MemoryStore
 from ..storage.db import Database
 from . import prompts
 from .addressing import AddressingStore
@@ -23,6 +25,13 @@ from .tasks import STATUS_PENDING, STATUS_RUNNING, TaskQueue
 
 KIND_RULE = "addressing_rule"
 KIND_LLM = "addressing_llm"
+KIND_TOPIC_RULE = "topic_rule"
+KIND_TOPIC_LLM = "topic_llm"
+KIND_EVENT_RULE = "event_rule"
+KIND_EVENT_LLM = "event_llm"
+
+RULE_KINDS = (KIND_RULE, KIND_TOPIC_RULE, KIND_EVENT_RULE)
+LLM_KINDS = (KIND_LLM, KIND_TOPIC_LLM, KIND_EVENT_LLM)
 
 DEFAULT_BATCH = 60
 MAX_MESSAGES_PER_PROMPT = 80
@@ -45,6 +54,7 @@ class AnalysisRunner:
         self.tick = tick_seconds
         self.queue = TaskQueue(db.conn)
         self.store = AddressingStore(db.conn)
+        self.memory = MemoryStore(db.conn)
         self.stats = {"rule_tasks": 0, "llm_tasks": 0, "errors": 0}
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
@@ -132,6 +142,15 @@ class AnalysisRunner:
                 payload={"group_ref": gid, "since": since, "until": until},
             ):
                 enqueued += 1
+            # Phase 4：群体记忆规则任务（每群每小时一桶）
+            enqueued += len(
+                await self.enqueue_memory(
+                    gid,
+                    kinds=(KIND_TOPIC_RULE, KIND_EVENT_RULE),
+                    since=since,
+                    until=until,
+                )
+            )
             if self.gateway is not None and self.gateway.remaining_today != 0:
                 spec = prompts.prompt_for("addressing")
                 if await self.queue.enqueue(
@@ -142,6 +161,21 @@ class AnalysisRunner:
                     prompt_version=spec["version"],
                 ):
                     enqueued += 1
+                # Phase 4：LLM 归纳（每群每 12 小时一桶，成本更低频）
+                twelve_hours = int(now // 43200)
+                for kind, pkind in (
+                    (KIND_TOPIC_LLM, "topic"),
+                    (KIND_EVENT_LLM, "event"),
+                ):
+                    pspec = prompts.prompt_for(pkind)
+                    if await self.queue.enqueue(
+                        kind,
+                        f"{kind}:{gid}:t{twelve_hours}:{pspec['version']}",
+                        payload={"group_ref": gid, "since": since, "until": until},
+                        priority=-2,
+                        prompt_version=pspec["version"],
+                    ):
+                        enqueued += 1
         return enqueued
 
     # -- 单次调度 ---------------------------------------------------
@@ -155,21 +189,32 @@ class AnalysisRunner:
         for _ in range(max(1, limit)):
             # 配额耗尽时只跑规则任务（零 LLM 成本），LLM 任务等次日额度
             if quota_exhausted:
-                tasks = await self.queue.claim(KIND_RULE, limit=1)
+                task = await self._claim_any(RULE_KINDS)
             else:
-                tasks = await self.queue.claim(limit=1)
-            if not tasks:
+                task = await self._claim_any(None)
+            if task is None:
                 break
-            task = tasks[0]
             try:
                 if task["kind"] == KIND_RULE:
                     await self._run_rule_task(task)
                     self.stats["rule_tasks"] += 1
                 elif task["kind"] == KIND_LLM:
-                    await self._run_llm_task(task)
+                    await self._run_llm_task(task, "addressing")
+                    self.stats["llm_tasks"] += 1
+                elif task["kind"] == KIND_TOPIC_RULE:
+                    await self._run_topic_rule(task)
+                    self.stats["rule_tasks"] += 1
+                elif task["kind"] == KIND_TOPIC_LLM:
+                    await self._run_topic_llm(task)
+                    self.stats["llm_tasks"] += 1
+                elif task["kind"] == KIND_EVENT_RULE:
+                    await self._run_event_rule(task)
+                    self.stats["rule_tasks"] += 1
+                elif task["kind"] == KIND_EVENT_LLM:
+                    await self._run_event_llm(task)
                     self.stats["llm_tasks"] += 1
                 else:
-                    # Phase 4 类型在各自阶段接入；未知类型直接取消
+                    # 未知类型直接取消（前向兼容）
                     await self.queue.cancel(int(task["id"]))
                     continue
                 await self.queue.complete(int(task["id"]))
@@ -186,6 +231,10 @@ class AnalysisRunner:
                 await self.queue.fail(task, str(e))
             handled += 1
         return handled
+
+    async def _claim_any(self, kinds: tuple[str, ...] | None) -> dict[str, Any] | None:
+        tasks = await self.queue.claim_kinds(kinds, limit=1)
+        return tasks[0] if tasks else None
 
     async def _requeue(self, task: dict[str, Any], error: str) -> None:
         """限流时把任务退回 pending（不消耗重试次数）。"""
@@ -235,7 +284,7 @@ class AnalysisRunner:
 
     # -- LLM 层 -----------------------------------------------------
 
-    async def _run_llm_task(self, task: dict[str, Any]) -> None:
+    async def _run_llm_task(self, task: dict[str, Any], prompt_kind: str = "addressing") -> None:
         if self.gateway is None:
             raise LLMCallError("LLM 分析未启用（无可 Provider 或已关闭）")
         payload = _payload(task)
@@ -259,49 +308,178 @@ class AnalysisRunner:
             f"{(m['text'] or '')[:200]}"
             for m in messages
         )
-        spec = prompts.prompt_for("addressing")
+        spec = prompts.prompt_for(prompt_kind)
         text = await self.gateway.chat(
             system=spec["system"],
             prompt=prompts.format_user(
-                "addressing", members=member_lines, messages=msg_lines
+                prompt_kind, members=member_lines, messages=msg_lines
             ),
         )
         rows = parse_json_array(text)
 
         valid_ids = {m["message_id"] for m in messages}
         valid_members = set(members)
-        clean: list[dict[str, Any]] = []
+        if prompt_kind == "addressing":
+            clean: list[dict[str, Any]] = []
+            for row in rows:
+                address = str(row.get("address") or "").strip()
+                evidence = str(row.get("evidence_msg_id") or "")
+                from_raw = str(row.get("from") or "")
+                to_raw = row.get("to")
+                if not address or evidence not in valid_ids or from_raw not in valid_members:
+                    continue
+                if to_raw is not None and str(to_raw) not in valid_members:
+                    continue  # 只允许指认库内成员，避免幻觉身份
+                try:
+                    confidence = float(row.get("confidence") or 0.0)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                clean.append(
+                    {
+                        "from_raw_id": from_raw,
+                        "to_raw_id": str(to_raw) if to_raw is not None else None,
+                        "address": address,
+                        "source": "llm",
+                        "confidence": max(0.0, min(1.0, confidence)),
+                        "evidence_msg_id": evidence,
+                        "prompt_version": spec["version"],
+                    }
+                )
+            if clean:
+                await self.store.upsert(
+                    clean,
+                    group_ref=int(group_ref),
+                    resolve_member=self._resolver_for(int(group_ref)),
+                    prompt_version=spec["version"],
+                )
+            return
+
+        if prompt_kind == "topic":
+            await self._persist_topics(int(group_ref), rows, valid_ids, spec)
+        elif prompt_kind == "event":
+            await self._persist_events(int(group_ref), rows, valid_ids, spec)
+
+    # -- Phase 4：话题 / 事件 ---------------------------------------
+
+    async def _run_topic_rule(self, task: dict[str, Any]) -> None:
+        payload = _payload(task)
+        group_ref = payload.get("group_ref")
+        if group_ref is None:
+            raise ValueError("任务缺少 group_ref")
+        messages = await self._fetch_messages(
+            int(group_ref), payload.get("since"), payload.get("until")
+        )
+        if len(messages) < 3:
+            return
+        mem_msgs = _to_mem_messages(messages)
+        topics = extract_topics(mem_msgs)
+        for topic in topics:
+            await self.memory.upsert_topic(int(group_ref), topic)
+
+    async def _run_event_rule(self, task: dict[str, Any]) -> None:
+        payload = _payload(task)
+        group_ref = payload.get("group_ref")
+        if group_ref is None:
+            raise ValueError("任务缺少 group_ref")
+        messages = await self._fetch_messages(
+            int(group_ref), payload.get("since"), payload.get("until")
+        )
+        if len(messages) < 3:
+            return
+        mem_msgs = _to_mem_messages(messages)
+        events = extract_events(mem_msgs)
+        for event in events:
+            await self.memory.upsert_event(int(group_ref), event)
+
+    async def _run_topic_llm(self, task: dict[str, Any]) -> None:
+        await self._run_llm_task(task, "topic")
+
+    async def _run_event_llm(self, task: dict[str, Any]) -> None:
+        await self._run_llm_task(task, "event")
+
+    async def _persist_topics(
+        self,
+        group_ref: int,
+        rows: list[dict[str, Any]],
+        valid_ids: set[str],
+        spec: dict[str, str],
+    ) -> None:
         for row in rows:
-            address = str(row.get("address") or "").strip()
-            evidence = str(row.get("evidence_msg_id") or "")
-            from_raw = str(row.get("from") or "")
-            to_raw = row.get("to")
-            if not address or evidence not in valid_ids or from_raw not in valid_members:
+            title = str(row.get("title") or "").strip()
+            if not title or len(title) > 40:
                 continue
-            if to_raw is not None and str(to_raw) not in valid_members:
-                continue  # 只允许指认库内成员，避免幻觉身份
             try:
                 confidence = float(row.get("confidence") or 0.0)
             except (TypeError, ValueError):
                 confidence = 0.0
-            clean.append(
-                {
-                    "from_raw_id": from_raw,
-                    "to_raw_id": str(to_raw) if to_raw is not None else None,
-                    "address": address,
-                    "source": "llm",
-                    "confidence": max(0.0, min(1.0, confidence)),
-                    "evidence_msg_id": evidence,
-                    "prompt_version": spec["version"],
-                }
-            )
-        if clean:
-            await self.store.upsert(
-                clean,
-                group_ref=int(group_ref),
-                resolve_member=self._resolver_for(int(group_ref)),
-                prompt_version=spec["version"],
-            )
+            evidence = [
+                str(e)
+                for e in (row.get("evidence_msg_id") or [])
+                if str(e) in valid_ids
+            ][:5]
+            topic = {
+                "title": title,
+                "keywords": [str(k) for k in (row.get("keywords") or [])][:8],
+                "summary": str(row.get("summary") or "")[:300],
+                "confidence": max(0.0, min(1.0, confidence)),
+                "evidence_msg_ids": evidence,
+                "mention_count": len(evidence) or 1,
+                "source": "llm",
+                "prompt_version": spec["version"],
+            }
+            await self.memory.upsert_topic(group_ref, topic)
+
+    async def _persist_events(
+        self,
+        group_ref: int,
+        rows: list[dict[str, Any]],
+        valid_ids: set[str],
+        spec: dict[str, str],
+    ) -> None:
+        allowed_kinds = ("meme", "event", "dispute", "routine")
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            if not title or len(title) > 40:
+                continue
+            kind = str(row.get("event_kind") or "event")
+            if kind not in allowed_kinds:
+                kind = "event"
+            try:
+                confidence = float(row.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            evidence = []
+            for ev in row.get("evidence") or []:
+                if not isinstance(ev, dict):
+                    continue
+                msg_id = str(ev.get("msg_id") or "")
+                if msg_id not in valid_ids:
+                    continue  # 幻觉证据直接丢弃
+                role = str(ev.get("role") or "spread")
+                if role not in ("origin", "spread", "evolve"):
+                    role = "spread"
+                evidence.append(
+                    {
+                        "msg_id": msg_id,
+                        "role": role,
+                        "note": str(ev.get("note") or "")[:100],
+                    }
+                )
+                if len(evidence) >= 5:
+                    break
+            if not evidence:
+                continue  # 无有效证据的事件不落库
+            event = {
+                "title": title,
+                "event_kind": kind,
+                "summary": str(row.get("summary") or "")[:300],
+                "confidence": max(0.0, min(1.0, confidence)),
+                "evidence": evidence,
+                "mention_count": len(evidence),
+                "source": "llm",
+                "prompt_version": spec["version"],
+            }
+            await self.memory.upsert_event(group_ref, event)
 
     # -- 数据装载 ---------------------------------------------------
 
@@ -395,6 +573,50 @@ class AnalysisRunner:
             priority=priority,
             prompt_version=spec["version"],
         )
+
+    async def enqueue_memory(
+        self,
+        group_ref: int,
+        *,
+        kinds: tuple[str, ...] = (KIND_TOPIC_RULE, KIND_EVENT_RULE),
+        since: int | None = None,
+        until: int | None = None,
+        priority: int = 0,
+        with_llm: bool = False,
+    ) -> list[str]:
+        """入队群体记忆任务（话题/事件，可选附带 LLM 归纳），返回实际入队的类型。"""
+        window = _window_key(since)
+        done: list[str] = []
+        for kind in kinds:
+            if kind in LLM_KINDS and not with_llm:
+                continue
+            prompt_version = None
+            if kind in LLM_KINDS:
+                spec = prompts.prompt_for("topic" if kind.startswith("topic") else "event")
+                prompt_version = spec["version"]
+            if await self.queue.enqueue(
+                kind,
+                f"{kind}:{group_ref}:{window}"
+                + (f":{prompt_version}" if prompt_version else ""),
+                payload={"group_ref": group_ref, "since": since, "until": until},
+                priority=priority,
+                prompt_version=prompt_version,
+            ):
+                done.append(kind)
+        return done
+
+
+def _to_mem_messages(rows: list[dict[str, Any]]) -> list[MemMessage]:
+    return [
+        MemMessage(
+            msg_id=str(m["message_id"]),
+            sender_id=str(m["sender_raw_id"] or ""),
+            text=m["text"] or "",
+            sent_at=int(m["sent_at"] or 0),
+            at_targets=m.get("at_targets") or [],
+        )
+        for m in rows
+    ]
 
 
 def _payload(task: dict[str, Any]) -> dict[str, Any]:
