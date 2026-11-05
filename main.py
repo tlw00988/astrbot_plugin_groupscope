@@ -25,6 +25,8 @@ from .groupscope.ops import backup as backup_ops
 from .groupscope.ops import export as export_ops
 from .groupscope.paths import plugin_data_dir
 from .groupscope.privacy import CapturePolicy
+from .groupscope.social import profiles as social_profiles
+from .groupscope.social import snapshots as social_snapshots
 from .groupscope.storage import repo
 from .groupscope.storage.db import Database
 
@@ -391,6 +393,222 @@ class Main(Star):
             yield event.plain_result(f"导出失败: {e}")
             return
         yield event.plain_result(f"导出完成: {dest}\n({dest.stat().st_size / 1024:.1f} KB)")
+
+    # ------------------------------------------------------------------
+    # Phase 2：人物与关系
+    # ------------------------------------------------------------------
+
+    @gs.command("member")
+    @filter.permission_type(ADMIN)
+    async def gs_member(self, event: AstrMessageEvent):
+        """成员档案：/gs member <成员ID|昵称>"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if not args:
+            yield event.plain_result("用法: /gs member <成员ID|昵称>")
+            return
+        keyword = args[0]
+        profile = None
+        if keyword.isdigit():
+            profile = await social_profiles.member_profile(self.db.conn, int(keyword))
+        if profile is None:
+            hits = await social_profiles.member_search(self.db.conn, keyword, limit=5)
+            if not hits:
+                yield event.plain_result(f"未找到成员: {keyword}")
+                return
+            if len(hits) > 1:
+                lines = [f"匹配到 {len(hits)} 个成员，请用更精确的 ID："]
+                lines += [
+                    f"- #{h['id']} {h['platform_id']}:{h['user_id']}"
+                    f" {h['current_nickname'] or '-'} ({h['message_count']}条)"
+                    for h in hits
+                ]
+                yield event.plain_result("\n".join(lines))
+                return
+            profile = await social_profiles.member_profile(
+                self.db.conn, hits[0]["id"]
+            )
+
+        lines = [
+            f"【成员档案】#{profile['id']} {profile['current_nickname'] or '-'}"
+            f"（{profile['platform_id']}:{profile['user_id']}）",
+            f"发言 {profile['message_count']} 条 | 首见 {_fmt_time(profile['first_seen'])}"
+            f" | 最近 {_fmt_time(profile['last_seen'])}",
+        ]
+        for g in profile["groups"][:6]:
+            lines.append(
+                f"群 {g['group_name'] or g['group_id']}: {g['message_count']} 条"
+                f"（最近 {_fmt_time(g['last_seen'])}）"
+            )
+        aliases = profile["aliases"]
+        if aliases:
+            lines.append(
+                "别名史: "
+                + "、".join(
+                    f"{a['alias']}[{'人工' if a['source'] == 'manual' else '观察'}]"
+                    f"×{a['seen_count']}"
+                    for a in aliases[:8]
+                )
+            )
+        out = [r for r in profile["interactions_out"] if r["kind"] != "at"][:5]
+        at_out = [r for r in profile["interactions_out"] if r["kind"] == "at"][:5]
+        if at_out:
+            lines.append(
+                "常 @: "
+                + "、".join(
+                    f"{r['other_nickname'] or r['other_user_id']}×{r['c']}"
+                    for r in at_out
+                )
+            )
+        if out:
+            lines.append(
+                "常回复: "
+                + "、".join(
+                    f"{r['other_nickname'] or r['other_user_id']}×{r['c']}"
+                    for r in out
+                )
+            )
+        if profile["recent_messages"]:
+            lines.append("最近消息:")
+            for m in profile["recent_messages"][:5]:
+                text = (m["text"] or "").replace("\n", " ")[:40]
+                marker = "[通知]" if m["event_kind"] == "notice" else ""
+                lines.append(f"  {_fmt_time(m['sent_at'])}{marker} {text}")
+        lines.append("（以上均为观察记录，不含推断）")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("relations")
+    @filter.permission_type(ADMIN)
+    async def gs_relations(self, event: AstrMessageEvent):
+        """关系窗口统计：/gs relations [群ID] [day|week|month|quarter]"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        window = "week"
+        group_ref = None
+        for a in args:
+            if a in social_snapshots.WINDOWS:
+                window = a
+            else:
+                row = await repo.find_group(self.db.conn, a)
+                if not row:
+                    yield event.plain_result(f"未找到群: {a}")
+                    return
+                group_ref = row["id"]
+
+        try:
+            await social_snapshots.compute_snapshots(
+                self.db.conn, group_ref=group_ref, window=window
+            )
+        except Exception as e:
+            self.logger.exception("计算关系快照失败")
+            yield event.plain_result(f"计算快照失败: {e}")
+            return
+
+        edges = await social_snapshots.snapshot_windows(
+            self.db.conn, group_ref=group_ref, window=window
+        )
+        if not edges:
+            yield event.plain_result(
+                f"窗口 {social_snapshots.WINDOW_LABELS[window]}内没有足够的互动记录。"
+            )
+            return
+
+        names: dict[int, str] = {}
+        for e in edges:
+            for key in ("from_member", "to_member"):
+                if e[key] not in names:
+                    cur = await self.db.conn.execute(
+                        "SELECT user_id, current_nickname FROM members WHERE id=?",
+                        (e[key],),
+                    )
+                    row = await cur.fetchone()
+                    names[e[key]] = (
+                        (row["current_nickname"] or row["user_id"]) if row else str(e[key])
+                    )
+
+        span = f"{_fmt_time(edges[0]['window_start'])} ~ {_fmt_time(edges[0]['window_end'])}"
+        label = social_snapshots.WINDOW_LABELS[window]
+        lines = [f"【关系窗口 · {label}】{span}", f"共 {len(edges)} 条有向互动边："]
+        for e in edges[:20]:
+            kinds = []
+            if e["at_count"]:
+                kinds.append(f"@×{e['at_count']}")
+            if e["reply_count"]:
+                kinds.append(f"回复×{e['reply_count']}")
+            if e["quote_count"]:
+                kinds.append(f"引用×{e['quote_count']}")
+            lines.append(
+                f"{names.get(e['from_member'], '?')} → {names.get(e['to_member'], '?')}: "
+                f"{' '.join(kinds)} | 证据 {e['evidence_count']} 强度 {e['confidence']}"
+            )
+        lines.append("说明：仅统计 @/回复/引用等确定性互动与证据量，不构成亲密度评价。")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("merge")
+    @filter.permission_type(ADMIN)
+    async def gs_merge(self, event: AstrMessageEvent):
+        """人工合并成员身份：/gs merge <源ID> <目标ID>（先自动备份）"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if len(args) < 2 or not (args[0].isdigit() and args[1].isdigit()):
+            yield event.plain_result(
+                "用法: /gs merge <源成员ID> <目标成员ID>\n"
+                "默认不合并身份；合并会留审计记录，执行前自动备份。"
+            )
+            return
+        src, dst = int(args[0]), int(args[1])
+        try:
+            backup = await self.db.backup(
+                self.data_dir / "backups", self.settings.backup_keep
+            )
+            message = await social_profiles.merge_members(
+                self.db.conn, src, dst, operator="gs-command"
+            )
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        except Exception as e:
+            self.logger.exception("合并成员失败")
+            yield event.plain_result(f"合并失败: {e}")
+            return
+        yield event.plain_result(f"{message}\n合并前备份: {backup.name}")
+
+    @gs.command("snapshot")
+    @filter.permission_type(ADMIN)
+    async def gs_snapshot(self, event: AstrMessageEvent):
+        """重算关系快照：/gs snapshot [群ID] [窗口]"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        window = "week"
+        group_ref = None
+        for a in args:
+            if a in social_snapshots.WINDOWS:
+                window = a
+            else:
+                row = await repo.find_group(self.db.conn, a)
+                if not row:
+                    yield event.plain_result(f"未找到群: {a}")
+                    return
+                group_ref = row["id"]
+        try:
+            n = await social_snapshots.compute_snapshots(
+                self.db.conn, group_ref=group_ref, window=window
+            )
+        except Exception as e:
+            self.logger.exception("计算快照失败")
+            yield event.plain_result(f"计算失败: {e}")
+            return
+        yield event.plain_result(
+            f"已计算 {n} 个 {social_snapshots.WINDOW_LABELS[window]}窗口的关系快照。"
+        )
 
     @gs.command("reload")
     @filter.permission_type(ADMIN)

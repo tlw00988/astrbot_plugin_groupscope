@@ -8,10 +8,29 @@ from typing import Any
 import aiosqlite
 
 from ..capture.models import NormalizedMessage
+from ..social.extract import dedupe_rows, extract_interactions
 
 # ---------------------------------------------------------------------------
 # 写入
 # ---------------------------------------------------------------------------
+
+
+async def _resolve_member_ref(
+    conn: aiosqlite.Connection,
+    platform_id: str,
+    raw_id: str,
+    cache: dict[tuple[str, str], int | None],
+) -> int | None:
+    """把平台内成员 raw id 解析为主键（带批内缓存，查不到记 None）。"""
+    key = (platform_id, raw_id)
+    if key in cache:
+        return cache[key]
+    cur = await conn.execute(
+        "SELECT id FROM members WHERE platform_id=? AND user_id=?", key
+    )
+    row = await cur.fetchone()
+    cache[key] = int(row["id"]) if row else None
+    return cache[key]
 
 
 async def _upsert_group(
@@ -171,15 +190,9 @@ async def insert_batch(conn: aiosqlite.Connection, items: list) -> int:
             for mention in item.mentions:
                 target_ref: int | None = None
                 if mention.target_raw_id and mention.kind == "at":
-                    key = (item.platform_id, mention.target_raw_id)
-                    if key not in member_cache:
-                        cur2 = await conn.execute(
-                            "SELECT id FROM members WHERE platform_id=? AND user_id=?",
-                            key,
-                        )
-                        row = await cur2.fetchone()
-                        member_cache[key] = int(row["id"]) if row else None
-                    target_ref = member_cache[key]
+                    target_ref = await _resolve_member_ref(
+                        conn, item.platform_id, mention.target_raw_id, member_cache
+                    )
                 await conn.execute(
                     "INSERT INTO message_mentions(message_ref, kind, target_raw_id,"
                     " target_ref) VALUES(?,?,?,?)",
@@ -188,6 +201,42 @@ async def insert_batch(conn: aiosqlite.Connection, items: list) -> int:
                         mention.kind,
                         mention.target_raw_id,
                         target_ref,
+                    ),
+                )
+
+            # Phase 2：确定性互动（@ / 回复 / 引用），只记观察事实
+            def _resolve_cached(raw_id: str) -> int | None:
+                return member_cache.get((item.platform_id, raw_id))
+
+            interaction_rows = dedupe_rows(
+                extract_interactions(
+                    item,
+                    message_ref=message_ref,
+                    group_ref=group_ref,
+                    from_member=member_ref,
+                    from_raw_id=item.sender_raw_id,
+                    resolve=_resolve_cached,
+                )
+            )
+            for row in interaction_rows:
+                to_ref = row["to_member"]
+                if to_ref is None and row["to_raw_id"]:
+                    to_ref = await _resolve_member_ref(
+                        conn, item.platform_id, row["to_raw_id"], member_cache
+                    )
+                await conn.execute(
+                    "INSERT INTO interactions(group_ref, from_member, from_raw_id,"
+                    " to_member, to_raw_id, kind, message_ref, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        row["group_ref"],
+                        row["from_member"],
+                        row["from_raw_id"],
+                        to_ref,
+                        row["to_raw_id"],
+                        row["kind"],
+                        row["message_ref"],
+                        row["created_at"],
                     ),
                 )
 

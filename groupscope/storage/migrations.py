@@ -13,8 +13,16 @@ import aiosqlite
 
 _SCHEMA_DIR = Path(__file__).parent
 
+
+def _load(version: int) -> str:
+    return (_SCHEMA_DIR / f"schema_v{version}.sql").read_text(encoding="utf-8")
+
+
 MIGRATIONS: list[tuple[int, str]] = [
-    (1, (_SCHEMA_DIR / "schema_v1.sql").read_text(encoding="utf-8")),
+    (1, _load(1)),
+    (2, _load(2)),  # Phase 2：人物与关系
+    (3, _load(3)),  # Phase 3：称呼与语义分析
+    (4, _load(4)),  # Phase 4：群体记忆
 ]
 
 LATEST_VERSION = max(version for version, _ in MIGRATIONS)
