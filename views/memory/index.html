@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GroupScope 群体记忆</title>
+<style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--card:#f6f8fa;--accent:#0969da;--err:#cf222e;--ok:#1a7f37;--warn:#9a6700}
+html[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--card:#161b22;--accent:#2f81f7;--err:#f85149;--ok:#3fb950;--warn:#d29922}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+.tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.tab{padding:6px 14px;border:1px solid var(--border);border-radius:16px;cursor:pointer;font-size:13px;background:var(--card);color:var(--fg)}
+.tab.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.bar-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
+select{background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px}
+#status{font-size:12px;min-height:18px;color:var(--err)}
+.wrap{display:flex;gap:12px;flex-wrap:wrap}
+#list{flex:1 1 340px;max-height:600px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px}
+#detail{flex:1 1 340px;min-width:290px}
+.item{padding:8px 9px;border-bottom:1px solid var(--border);cursor:pointer}
+.item:hover,.item.on{background:var(--accent);color:#fff}
+.item .t{font-size:13.5px;font-weight:600}
+.item .m{font-size:11px;opacity:.78}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.panel h3{margin:0 0 6px;font-size:13px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td,th{padding:5px 4px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.muted{color:var(--muted)}
+.chip{display:inline-block;font-size:11px;border:1px solid var(--border);border-radius:10px;padding:0 7px;margin:1px 3px 1px 0;color:var(--muted)}
+.src-rule{color:var(--ok);border-color:var(--ok)}
+.src-llm{color:var(--warn);border-color:var(--warn)}
+.src-manual{color:var(--accent);border-color:var(--accent)}
+.msg{cursor:pointer;padding:4px 2px;border-bottom:1px dashed var(--border)}
+.msg:hover{color:var(--accent)}
+.note{font-size:12px;color:var(--muted);border-left:3px solid var(--accent);padding-left:8px;margin:6px 0}
+.empty{color:var(--muted);font-size:13px;padding:8px 0}
+.badge{font-size:11px;border:1px solid var(--border);border-radius:4px;padding:0 5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<h1>群体记忆</h1>
+<div class="sub">话题、事件与梗、时间线、称呼体系。<b>全部是基于消息证据的推断</b>，不是事实陈述；每条都可回溯原消息。</div>
+<div class="tabs">
+  <div class="tab on" data-tab="topics">话题</div>
+  <div class="tab" data-tab="events">事件 / 梗</div>
+  <div class="tab" data-tab="timeline">时间线</div>
+  <div class="tab" data-tab="addressing">称呼体系</div>
+</div>
+<div class="bar-row">
+  <select id="group"><option value="">全部群</option></select>
+  <span class="muted" id="hint"></span>
+</div>
+<div id="status"></div>
+<div class="wrap">
+  <div id="list"><div class="empty" style="padding:8px">加载中…</div></div>
+  <div id="detail"><div class="panel"><div class="empty">← 选择左侧条目查看证据</div></div></div>
+</div>
+
+<script>
+(function () {
+  function onBridge(cb) {
+    if (window.AstrBotPluginView) { cb(window.AstrBotPluginView); return; }
+    var n = 0, t = setInterval(function () {
+      if (window.AstrBotPluginView) { clearInterval(t); cb(window.AstrBotPluginView); }
+      else if (++n > 150) { clearInterval(t); status("插件桥接脚本未加载，请刷新"); }
+    }, 20);
+  }
+  function status(m) { document.getElementById("status").textContent = m || ""; }
+  function applyTheme(b) {
+    var ctx = b.getContext && b.getContext();
+    var dark = ctx && ctx.isDark;
+    if (dark === undefined || dark === null) dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function fmtTs(ts) {
+    if (!ts) return "-";
+    var d = new Date(ts * 1000);
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function srcChip(src) {
+    var label = { rule: "规则", llm: "AI", manual: "人工" }[src] || src;
+    return '<span class="chip src-' + esc(src) + '">' + label + "</span>";
+  }
+  var bridge = null, tab = "topics", groupParam = "";
+
+  onBridge(function (b) {
+    bridge = b;
+    applyTheme(b);
+    b.onContext(function () { applyTheme(b); });
+    b.apiGet("overview", {}).then(function (d) {
+      var sel = document.getElementById("group");
+      (d.groups || []).forEach(function (g) {
+        var o = document.createElement("option");
+        o.value = g.id;
+        o.textContent = g.group_name || g.group_id;
+        sel.appendChild(o);
+      });
+    }).catch(function () {});
+    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (node) {
+      node.onclick = function () {
+        Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (x) { x.classList.remove("on"); });
+        node.classList.add("on");
+        tab = node.dataset.tab;
+        load();
+      };
+    });
+    document.getElementById("group").onchange = function () {
+      groupParam = this.value;
+      load();
+    };
+    load();
+  });
+
+  function params(extra) {
+    var p = extra || {};
+    if (groupParam) p.group = groupParam;
+    return p;
+  }
+
+  function load() {
+    if (!bridge) return;
+    status("");
+    var listEl = document.getElementById("list");
+    listEl.innerHTML = '<div class="empty" style="padding:8px">加载中…</div>';
+    var hint = document.getElementById("hint");
+    var ep = { topics: "topics", events: "events", timeline: "timeline", addressing: "addressing" }[tab];
+    hint.textContent = { topics: "关键词共现统计 + AI 归纳", events: "归一化短语重复 / AI 归纳，标首现与传播",
+      timeline: "由话题与事件派生", addressing: "规则 / AI / 人工三层，manual 优先级最高" }[tab];
+    bridge.apiGet(ep, params(tab === "timeline" ? { limit: 60 } : {})).then(function (d) {
+      var items = d.items || [];
+      if (tab === "addressing") renderAddressing(items, d.aggregate || []);
+      else if (tab === "timeline") renderTimeline(items);
+      else if (tab === "topics") renderTopics(items);
+      else renderEvents(items);
+    }).catch(function (e) { status("加载失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function renderTopics(items) {
+    var el = document.getElementById("list");
+    if (!items.length) { el.innerHTML = '<div class="empty" style="padding:8px">暂无话题（可在 AstrBot 中执行 /gs analyze 群ID topic 触发）</div>'; return; }
+    el.innerHTML = items.map(function (t) {
+      return '<div class="item" data-id="' + t.id + '"><div class="t">' + esc(t.title) + "</div>" +
+        '<div class="m">提及 ' + t.mention_count + " 次 · 置信 " + t.confidence.toFixed(2) +
+        " · 证据 " + (t.evidence || 0) + " 条 " + srcChip(t.source) + "</div></div>";
+    }).join("");
+    bindList(function (id) { showTopic(id); });
+  }
+
+  function renderEvents(items) {
+    var el = document.getElementById("list");
+    var kindLabel = { meme: "梗", event: "事件", dispute: "争议", routine: "日常" };
+    if (!items.length) { el.innerHTML = '<div class="empty" style="padding:8px">暂无事件/梗（可用 /gs analyze 群ID event 触发）</div>'; return; }
+    el.innerHTML = items.map(function (t) {
+      return '<div class="item" data-id="' + t.id + '"><div class="t">' + esc(t.title) + "</div>" +
+        '<div class="m">' + (kindLabel[t.event_kind] || t.event_kind) + " · 出现 " + t.mention_count +
+        " 次 · 证据 " + (t.evidence || 0) + " 条 " + srcChip(t.source) + "</div></div>";
+    }).join("");
+    bindList(function (id) { showEvent(id); });
+  }
+
+  function renderTimeline(items) {
+    var el = document.getElementById("list");
+    if (!items.length) { el.innerHTML = '<div class="empty" style="padding:8px">暂无时间线（需先产生话题/事件）</div>'; return; }
+    el.innerHTML = items.map(function (t) {
+      var mark = t.item_kind === "topic" ? "📌" : "🔥";
+      return '<div class="item" data-kind="' + t.item_kind + '" data-id="' + t.item_id + '">' +
+        '<div class="t">' + mark + " " + esc(t.label) + "</div>" +
+        '<div class="m">' + fmtTs(t.occurred_at) + (t.detail ? " · " + esc(t.detail) : "") + "</div></div>";
+    }).join("");
+    bindList(function (id, node) {
+      if (node.dataset.kind === "topic") showTopic(id);
+      else showEvent(id);
+    });
+  }
+
+  function renderAddressing(items, agg) {
+    var el = document.getElementById("list");
+    if (!items.length) { el.innerHTML = '<div class="empty" style="padding:8px">暂无称呼记录（/gs analyze 群ID 或 /gs alias 补充）</div>'; return; }
+    el.innerHTML = items.map(function (a) {
+      var frm = a.from_user_id ? esc(a.from_nick || a.from_user_id) + " → " : "任意 → ";
+      var to = esc(a.to_nick || a.to_user_id || "?");
+      return '<div class="item" data-addr="1"><div class="t">' + frm + to + "：「" + esc(a.address) + "」</div>" +
+        '<div class="m">' + srcChip(a.source) + " 置信 " + a.confidence.toFixed(2) +
+        " ×" + a.seen_count + " · 最近 " + fmtTs(a.last_seen) + "</div></div>";
+    }).join("");
+    var det = document.getElementById("detail");
+    det.innerHTML = '<div class="panel"><h3>称呼聚合（谁被怎么叫）</h3>' +
+      (agg.length ? "<table><tr><th>称呼</th><th>对象数</th><th>总次数</th><th>规则/AI/人工</th></tr>" +
+        agg.map(function (a) {
+          return "<tr><td>「" + esc(a.address) + "」</td><td>" + a.targets + "</td><td>" + a.total +
+            "</td><td>" + a.rule_rows + "/" + a.llm_rows + "/" + a.manual_rows + "</td></tr>";
+        }).join("") + "</table>" : '<div class="empty">无</div>') +
+      '<div class="note">manual（人工指定）优先级最高；rule 来自可解释规则；llm 为 AI 推断，置信度仅供参考。</div></div>';
+    Array.prototype.forEach.call(el.querySelectorAll(".item"), function (node) {
+      node.onclick = function () {
+        Array.prototype.forEach.call(el.querySelectorAll(".item"), function (x) { x.classList.remove("on"); });
+        node.classList.add("on");
+      };
+    });
+  }
+
+  function bindList(onPick) {
+    var el = document.getElementById("list");
+    Array.prototype.forEach.call(el.querySelectorAll(".item"), function (node) {
+      node.onclick = function () {
+        Array.prototype.forEach.call(el.querySelectorAll(".item"), function (x) { x.classList.remove("on"); });
+        node.classList.add("on");
+        onPick(parseInt(node.dataset.id, 10), node);
+      };
+    });
+    var first = el.querySelector(".item");
+    if (first) first.click();
+  }
+
+  function showTopic(id) {
+    bridge.apiGet("topic/" + id, {}).then(function (d) {
+      var t = d.topic;
+      var ev = (d.evidence || []).map(function (m) {
+        return '<div class="msg" data-mid="' + m.id + '">' + fmtTs(m.sent_at) + " [" +
+          esc(m.sender_raw_name || m.sender_raw_id || "?") + "] " + esc((m.text || "").slice(0, 70)) + "</div>";
+      }).join("") || '<div class="empty">无可回溯证据</div>';
+      var kw = "";
+      try { kw = (JSON.parse(t.keywords_json || "[]")).map(function (k) { return '<span class="chip">' + esc(k) + "</span>"; }).join(""); } catch (e) {}
+      document.getElementById("detail").innerHTML =
+        '<div class="panel"><h3>话题</h3><div style="font-size:15px;font-weight:650">' + esc(t.title) + "</div>" +
+        '<div class="muted" style="font-size:12px">' + srcChip(t.source) +
+        (t.prompt_version ? ' <span class="badge">' + esc(t.prompt_version) + "</span>" : "") +
+        " · 置信 " + Number(t.confidence).toFixed(2) + " · 提及 " + t.mention_count + " 次<br>首见 " +
+        fmtTs(t.first_seen) + " → 最近 " + fmtTs(t.last_seen) + "</div>" +
+        (t.summary ? '<div class="note">' + esc(t.summary) + "</div>" : "") +
+        (kw ? "<div style='margin-top:6px'>" + kw + "</div>" : "") + "</div>" +
+        '<div class="panel"><h3>证据消息（点击查看原消息）</h3>' + ev + "</div>" +
+        '<div class="note">这是基于消息统计/AI 归纳的<b>推断</b>，不是事实。</div>';
+      bindMsgs();
+    }).catch(function (e) { status("加载话题失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function showEvent(id) {
+    bridge.apiGet("event/" + id, {}).then(function (d) {
+      var t = d.event;
+      var roleLabel = { origin: "首现", spread: "传播", evolve: "演变" };
+      var ev = (d.evidence || []).map(function (m) {
+        return '<div class="msg" data-mid="' + m.id + '"><span class="badge">' +
+          (roleLabel[m.role] || m.role) + "</span> " + fmtTs(m.sent_at) + " [" +
+          esc(m.sender_raw_name || m.sender_raw_id || "?") + "] " + esc((m.text || "").slice(0, 60)) +
+          (m.note ? ' <span class="muted">(' + esc(m.note) + ")</span>" : "") + "</div>";
+      }).join("") || '<div class="empty">无可回溯证据</div>';
+      var kindLabel = { meme: "梗", event: "事件", dispute: "争议", routine: "日常" };
+      document.getElementById("detail").innerHTML =
+        '<div class="panel"><h3>' + (kindLabel[t.event_kind] || "事件") + "</h3>" +
+        '<div style="font-size:15px;font-weight:650">' + esc(t.title) + "</div>" +
+        '<div class="muted" style="font-size:12px">' + srcChip(t.source) +
+        (t.prompt_version ? ' <span class="badge">' + esc(t.prompt_version) + "</span>" : "") +
+        " · 置信 " + Number(t.confidence).toFixed(2) + " · 出现 " + t.mention_count + " 次<br>首现 " +
+        fmtTs(t.first_seen) + " → 最近 " + fmtTs(t.last_seen) +
+        (t.peak_at ? " · 峰值 " + fmtTs(t.peak_at) : "") + "</div>" +
+        (t.summary ? '<div class="note">' + esc(t.summary) + "</div>" : "") + "</div>" +
+        '<div class="panel"><h3>证据链（首现 → 传播 → 演变，点击查看原消息）</h3>' + ev + "</div>" +
+        '<div class="note">“梗”的判定基于相同内容重复出现，是可观测统计；演变过程为推断。</div>';
+      bindMsgs();
+    }).catch(function (e) { status("加载事件失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function bindMsgs() {
+    Array.prototype.forEach.call(document.querySelectorAll("#detail .msg"), function (node) {
+      node.onclick = function () { showMessage(parseInt(node.dataset.mid, 10)); };
+    });
+  }
+
+  function showMessage(id) {
+    bridge.apiGet("message/" + id, {}).then(function (d) {
+      var m = d.message;
+      var segs = (d.segments || []).map(function (s) {
+        return "<tr><td>#" + s.seg_index + "</td><td>" + esc(s.seg_type) + "</td><td>" +
+          esc((s.text || s.payload_json || "").slice(0, 140)) + "</td></tr>";
+      }).join("");
+      var ctxRows = function (arr) {
+        return (arr || []).map(function (r) {
+          return '<div class="msg" data-mid="' + r.id + '">' + fmtTs(r.sent_at) + " [" +
+            esc(r.sender_raw_name || r.sender_raw_id || "?") + "] " + esc((r.text || "").slice(0, 70)) + "</div>";
+        }).join("");
+      };
+      document.getElementById("detail").innerHTML =
+        '<div class="panel"><h3>原消息 #' + m.id + "</h3>" +
+        '<div class="muted">' + fmtTs(m.sent_at) + " ｜ " + esc(m.sender_raw_name || m.sender_raw_id) +
+        " ｜ 类型 " + esc(m.message_type) + "</div>" +
+        '<div style="margin:6px 0;white-space:pre-wrap;word-break:break-word">' + esc(m.text || "(无文本)") + "</div>" +
+        (segs ? "<h3>完整消息段</h3><table><tr><th>#</th><th>类型</th><th>内容</th></tr>" + segs + "</table>" : "") +
+        "</div>" +
+        '<div class="panel"><h3>前文</h3>' + (ctxRows(d.before) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="panel"><h3>后文</h3>' + (ctxRows(d.after) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="note">证据消息即原始存档，AI 推断不能修改它。</div>';
+      bindMsgs();
+    }).catch(function (e) { status("加载消息失败：" + (e && e.message ? e.message : e)); });
+  }
+})();
+</script>
+</body>
+</html>

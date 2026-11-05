@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GroupScope 人物档案</title>
+<style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--card:#f6f8fa;--accent:#0969da;--err:#cf222e;--ok:#1a7f37}
+html[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--card:#161b22;--accent:#2f81f7;--err:#f85149;--ok:#3fb950}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+.bar-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+input{background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;min-width:200px}
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer}
+#status{font-size:12px;min-height:18px;color:var(--err)}
+.wrap{display:flex;gap:12px;flex-wrap:wrap}
+#list{flex:0 0 260px;max-height:560px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:8px}
+#list .item{padding:9px 11px;border-bottom:1px solid var(--border);cursor:pointer}
+#list .item:hover,#list .item.on{background:var(--accent);color:#fff}
+#list .item .m{font-size:11px;opacity:.75}
+#detail{flex:1 1 380px;min-width:300px}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.panel h3{margin:0 0 6px;font-size:13px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td,th{padding:5px 4px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.muted{color:var(--muted)}
+.chip{display:inline-block;font-size:11px;border:1px solid var(--border);border-radius:10px;padding:0 7px;margin:1px 3px 1px 0;color:var(--muted)}
+.chip.manual{border-color:var(--ok);color:var(--ok)}
+.msg{cursor:pointer;padding:4px 2px;border-bottom:1px dashed var(--border)}
+.msg:hover{color:var(--accent)}
+.note{font-size:12px;color:var(--muted);border-left:3px solid var(--accent);padding-left:8px;margin-top:6px}
+.empty{color:var(--muted);font-size:13px;padding:8px 0}
+</style>
+</head>
+<body>
+<h1>人物档案</h1>
+<div class="sub">身份、别名史、发言、称呼与有向互动。点消息可查看原消息上下文（含完整消息段）。</div>
+<div class="bar-row">
+  <input id="q" placeholder="按 ID / 昵称 / 别名搜索">
+  <button id="search">搜索</button>
+  <span class="muted" id="count"></span>
+</div>
+<div id="status"></div>
+<div class="wrap">
+  <div id="list"><div class="empty" style="padding:10px">加载中…</div></div>
+  <div id="detail"><div class="panel"><div class="empty">← 选择左侧成员查看档案</div></div></div>
+</div>
+
+<script>
+(function () {
+  function onBridge(cb) {
+    if (window.AstrBotPluginView) { cb(window.AstrBotPluginView); return; }
+    var n = 0, t = setInterval(function () {
+      if (window.AstrBotPluginView) { clearInterval(t); cb(window.AstrBotPluginView); }
+      else if (++n > 150) { clearInterval(t); status("插件桥接脚本未加载，请刷新"); }
+    }, 20);
+  }
+  function status(m) { document.getElementById("status").textContent = m || ""; }
+  function applyTheme(b) {
+    var ctx = b.getContext && b.getContext();
+    var dark = ctx && ctx.isDark;
+    if (dark === undefined || dark === null) dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function fmtTs(ts) {
+    if (!ts) return "-";
+    var d = new Date(ts * 1000);
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  var bridge = null, currentId = null;
+
+  onBridge(function (b) {
+    bridge = b;
+    applyTheme(b);
+    b.onContext(function () { applyTheme(b); });
+    document.getElementById("search").onclick = function () { loadList(); };
+    document.getElementById("q").onkeydown = function (e) { if (e.key === "Enter") loadList(); };
+    loadList();
+  });
+
+  function loadList() {
+    var q = document.getElementById("q").value.trim();
+    status("");
+    bridge.apiGet("members", q ? { q: q } : {}).then(function (d) {
+      var items = d.items || [];
+      document.getElementById("count").textContent = items.length + " 个成员";
+      var el = document.getElementById("list");
+      if (!items.length) { el.innerHTML = '<div class="empty" style="padding:10px">没有匹配的成员</div>'; return; }
+      el.innerHTML = items.map(function (m) {
+        return '<div class="item" data-id="' + m.id + '"><div>' + esc(m.current_nickname || m.user_id) +
+          '</div><div class="m">' + esc(m.user_id) + " · " + m.message_count + " 条 · " + fmtTs(m.last_seen) + "</div></div>";
+      }).join("");
+      Array.prototype.forEach.call(el.querySelectorAll(".item"), function (node) {
+        node.onclick = function () {
+          Array.prototype.forEach.call(el.querySelectorAll(".item"), function (x) { x.classList.remove("on"); });
+          node.classList.add("on");
+          loadDetail(parseInt(node.dataset.id, 10));
+        };
+      });
+      if (items.length) {
+        var first = el.querySelector(".item");
+        first.classList.add("on");
+        loadDetail(items[0].id);
+      }
+    }).catch(function (e) { status("加载失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function loadDetail(id) {
+    currentId = id;
+    bridge.apiGet("member/" + id, {}).then(function (p) {
+      if (currentId !== id) return;
+      var el = document.getElementById("detail");
+      var aliases = (p.aliases || []).map(function (a) {
+        return '<span class="chip">' + esc(a.alias) + " ×" + a.seen_count + "</span>";
+      }).join("") || '<span class="muted">无</span>';
+      var groups = (p.groups || []).map(function (g) {
+        return "<tr><td>" + esc(g.group_name || g.group_id) + "</td><td>" + esc(g.platform_name) +
+          "</td><td>" + (g.current_nick ? esc(g.current_nick) : "-") + "</td><td>" + g.message_count + "</td></tr>";
+      }).join("") || '<tr><td colspan="4" class="muted">无</td></tr>';
+      var recent = (p.recent_messages || []).map(function (m) {
+        return '<div class="msg" data-mid="' + m.id + '">[' + fmtTs(m.sent_at) + '] ' +
+          esc((m.text || "").slice(0, 60)) + "</div>";
+      }).join("") || '<div class="empty">无</div>';
+      var kindLabel = { at: "@", reply: "回复", quote: "引用" };
+      var out = (p.interactions_out || []).map(function (i) {
+        return "<tr><td>→ " + esc(i.other_nickname || i.other_user_id || i.other_ref) +
+          "</td><td>" + (kindLabel[i.kind] || i.kind) + "</td><td>" + i.c +
+          '</td><td class="muted">' + fmtTs(i.last_at) + "</td></tr>";
+      }).join("");
+      var inn = (p.interactions_in || []).map(function (i) {
+        return "<tr><td>← " + esc(i.other_nickname || i.other_user_id || i.other_ref) +
+          "</td><td>" + (kindLabel[i.kind] || i.kind) + "</td><td>" + i.c +
+          '</td><td class="muted">' + fmtTs(i.last_at) + "</td></tr>";
+      }).join("");
+      var addressed = (p.addressed_as || []).map(function (a) {
+        var src = { rule: "规则", llm: "AI", manual: "人工" }[a.source] || a.source;
+        var frm = a.from_user_id ? esc(a.from_nick || a.from_user_id) + " → " : "任意 → ";
+        return "<tr><td>" + frm + "<b>" + esc(a.address) + "</b></td><td>" + src +
+          "</td><td>" + a.confidence.toFixed(2) + "</td><td>×" + a.seen_count + "</td></tr>";
+      }).join("");
+
+      el.innerHTML =
+        '<div class="panel"><h3>身份</h3><div style="font-size:16px;font-weight:650">' +
+        esc(p.current_nickname || p.user_id) + '</div><div class="muted">ID ' + esc(p.user_id) +
+        " ｜ 平台 " + esc(p.platform_id) + " ｜ 发言 " + p.message_count + " 条<br>首见 " +
+        fmtTs(p.first_seen) + " ｜ 最近 " + fmtTs(p.last_seen) + "</div></div>" +
+        '<div class="panel"><h3>别名史（观察到的）</h3>' + aliases + "</div>" +
+        '<div class="panel"><h3>被怎么称呼（推断，带来源与置信度）</h3>' +
+        (addressed ? "<table><tr><th>称呼</th><th>来源</th><th>置信</th><th>次数</th></tr>" + addressed + "</table>"
+          : '<div class="empty">暂无称呼记录</div>') + "</div>" +
+        '<div class="panel"><h3>所在群</h3><table><tr><th>群</th><th>平台</th><th>群内昵称</th><th>发言</th></tr>' +
+        groups + "</table></div>" +
+        '<div class="panel"><h3>发出的互动（有向）</h3>' +
+        (out ? "<table><tr><th>对象</th><th>类型</th><th>次数</th><th>最近</th></tr>" + out + "</table>" : '<div class="empty">无</div>') +
+        '<div class="note">互动只统计 @/回复/引用等确定性行为，不代表关系亲疏。</div></div>' +
+        '<div class="panel"><h3>收到的互动（有向）</h3>' +
+        (inn ? "<table><tr><th>来源</th><th>类型</th><th>次数</th><th>最近</th></tr>" + inn + "</table>" : '<div class="empty">无</div>') + "</div>" +
+        '<div class="panel"><h3>最近消息（点击查看原消息）</h3>' + recent + "</div>";
+
+      Array.prototype.forEach.call(el.querySelectorAll(".msg"), function (node) {
+        node.onclick = function () { showMessage(parseInt(node.dataset.mid, 10)); };
+      });
+    }).catch(function (e) { status("加载档案失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function showMessage(id) {
+    bridge.apiGet("message/" + id, {}).then(function (d) {
+      var m = d.message;
+      var segs = (d.segments || []).map(function (s) {
+        return "<tr><td>#" + s.seg_index + "</td><td>" + esc(s.seg_type) + "</td><td>" +
+          esc((s.text || s.payload_json || "").slice(0, 120)) + "</td></tr>";
+      }).join("");
+      var ctxRows = function (arr) {
+        return (arr || []).map(function (r) {
+          return '<div class="msg" data-mid="' + r.id + '">' + fmtTs(r.sent_at) + " [" +
+            esc(r.sender_raw_name || r.sender_raw_id || "?") + "] " + esc((r.text || "").slice(0, 60)) + "</div>";
+        }).join("");
+      };
+      var html =
+        '<div class="panel"><h3>原消息 #' + m.id + "</h3>" +
+        '<div class="muted">' + fmtTs(m.sent_at) + " ｜ " + esc(m.sender_raw_name || m.sender_raw_id) +
+        " ｜ 类型 " + esc(m.message_type) + (m.reply_to_sender_id ? " ｜ 回复 " + m.reply_to_sender_id : "") + "</div>" +
+        "<div style='margin:6px 0;white-space:pre-wrap'>" + esc(m.text || "(无文本)") + "</div>" +
+        (segs ? "<h3>完整消息段</h3><table><tr><th>#</th><th>类型</th><th>内容</th></tr>" + segs + "</table>" : "") +
+        "</div>" +
+        '<div class="panel"><h3>前文</h3>' + (ctxRows(d.before) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="panel"><h3>后文</h3>' + (ctxRows(d.after) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="note">分析结论中的“证据消息”即可回溯到这里：原始消息不可被推断改写。</div>';
+      document.getElementById("detail").innerHTML = html;
+      Array.prototype.forEach.call(document.querySelectorAll("#detail .msg"), function (node) {
+        node.onclick = function () { showMessage(parseInt(node.dataset.mid, 10)); };
+      });
+      document.getElementById("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+    }).catch(function (e) { status("加载消息失败：" + (e && e.message ? e.message : e)); });
+  }
+})();
+</script>
+</body>
+</html>

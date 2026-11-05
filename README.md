@@ -52,6 +52,13 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 | `log_retention_days` | `0` | 原始消息保留天数，`0` = 永久 |
 | `backup_auto` / `backup_keep` | `false` / `7` | 每日自动备份与轮转 |
 | `log_detail` | `false` | 采集详细日志（排障用） |
+| `analysis_enabled` | `true` | AI 分析总开关（称呼/话题/事件；规则层始终零成本运行） |
+| `llm_provider_id` | 空 | 分析使用的对话模型，留空 = 自动取第一个可用 Provider（**不存 API Key**） |
+| `analysis_concurrency` | `1` | LLM 并发上限 |
+| `analysis_interval_ms` | `1500` | LLM 最小调用间隔（毫秒） |
+| `analysis_daily_limit` | `200` | 每日 LLM 调用上限（耗尽后当天只跑规则层） |
+| `analysis_window_hours` | `24` | 每次分析的回溯窗口（小时） |
+| `analysis_batch_size` | `3` | 分析循环单次处理任务数 |
 
 ## 指令（均需管理员权限）
 
@@ -65,6 +72,34 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 | `/gs backup` / `/gs backups` / `/gs restore <文件名>` | 备份、列出、恢复 |
 | `/gs export <json\|csv> [群ID]` | 导出消息档案（含消息段） |
 | `/gs reload` | 重新读取配置（无需重载插件） |
+| `/gs member <成员ID\|昵称>` | 成员档案（别名史/互动/最近消息）（Phase 2） |
+| `/gs relations [群ID] [day\|week\|month\|quarter]` | 有向关系快照（Phase 2） |
+| `/gs merge <主ID> <被合并ID>` | 人工合并重复成员（Phase 2） |
+| `/gs snapshot [群ID] [窗口]` | 立即计算关系快照（Phase 2） |
+| `/gs address [群ID] [关键词]` | 称呼体系查询，标注来源与置信度（Phase 3） |
+| `/gs analyze <群ID> [rule\|llm\|topic\|event\|all]` | 立即入队分析（Phase 3/4） |
+| `/gs tasks` | 分析任务队列与 LLM 限流状态（Phase 3） |
+| `/gs reanalyze <群ID> [rule\|llm\|topic\|event\|all]` | 按当前提示词版本重新分析（Phase 3/4） |
+| `/gs alias <成员ID> <称呼> [群ID]` | 人工指定称呼（`manual`，优先级最高）（Phase 3） |
+| `/gs topics` / `/gs topic 1 <ID>` | 话题列表 / 话题证据消息（Phase 4） |
+| `/gs events` / `/gs event 1 <ID>` | 事件与梗 / 首现→传播证据链（Phase 4） |
+| `/gs timeline [群ID] [条数]` | 群体记忆时间线（Phase 4） |
+
+## WebUI（Phase 5，复用 AstrBot Dashboard）
+
+视图放在插件 `views/` 目录，由 Dashboard 以 iframe 加载；入口：**WebUI → 插件 → GroupScope → 详情页 → 打开视图**。
+鉴权完全复用 Dashboard（JWT / plugin-scope API Key），不自建账号体系。
+
+| 视图 | 内容 |
+| --- | --- |
+| `overview` 总览 | 采集/AI 开关、消息量与 7 日柱状图、群列表、分析管线与限流状态 |
+| `relations` 关系网络 | 有向互动力导向图（@/回复/引用为边，线宽=证据量），**不含亲密度评价** |
+| `members` 人物档案 | 身份、别名史、被称呼记录、有向互动、最近消息，可点开原消息与完整消息段 |
+| `search` 消息检索 | 检索原始存档，查看前后 5 条上下文与完整消息段 |
+| `memory` 群体记忆 | 话题 / 事件与梗 / 时间线 / 称呼体系，全部带证据并可跳回原消息 |
+
+后端接口经 `context.register_web_api` 注册在 `/api/v1/plugins/extensions/astrbot_plugin_groupscope/...`，
+只读（删除类操作只走管理员指令）；视图元数据在 `.astrbot-plugin/i18n/zh-CN.json`。
 
 ## 隐私
 

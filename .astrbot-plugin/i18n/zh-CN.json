@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "display_name": "GroupScope 群聊观察与数字档案",
+    "short_desc": "长期、可靠地记录群聊原始消息，为人物关系与群体记忆分析打基础。"
+  },
+  "views": {
+    "overview": {
+      "title": "总览",
+      "description": "采集状态、消息量、群列表与分析管线状态"
+    },
+    "relations": {
+      "title": "关系网络",
+      "description": "基于 @/回复/引用证据的有向互动图（不代表亲密度）"
+    },
+    "members": {
+      "title": "人物档案",
+      "description": "成员身份、别名史、称呼、有向互动与最近消息"
+    },
+    "search": {
+      "title": "消息检索",
+      "description": "检索原始消息存档并查看完整消息段与上下文"
+    },
+    "memory": {
+      "title": "群体记忆",
+      "description": "话题、事件与梗、时间线、称呼体系（均带证据可回溯）"
+    }
+  }
+}

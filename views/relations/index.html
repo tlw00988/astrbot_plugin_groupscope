@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GroupScope 关系网络</title>
+<style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--card:#f6f8fa;--accent:#0969da;--err:#cf222e}
+html[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--card:#161b22;--accent:#2f81f7;--err:#f85149}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+.bar-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+select,input{background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px}
+input{min-width:160px}
+#status{font-size:12px;min-height:18px;color:var(--err)}
+.wrap{display:flex;gap:12px;flex-wrap:wrap}
+#graph{flex:1 1 420px;min-width:320px;height:460px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:grab}
+#side{flex:0 0 280px;font-size:13px}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.panel h3{margin:0 0 6px;font-size:13px}
+.panel table{width:100%;border-collapse:collapse;font-size:12px}
+.panel td{padding:4px 2px;border-bottom:1px solid var(--border)}
+.panel tr:last-child td{border-bottom:none}
+.muted{color:var(--muted)}
+.note{font-size:12px;color:var(--muted);border-left:3px solid var(--accent);padding-left:8px;margin-top:8px}
+#tip{position:fixed;pointer-events:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;display:none;z-index:9;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+</style>
+</head>
+<body>
+<h1>关系网络</h1>
+<div class="sub">有向边 = 确定性互动（@ / 回复 / 引用），线宽 = 证据量。边不等于亲密程度。</div>
+<div class="bar-row">
+  <select id="window"><option value="day">按日</option><option value="week" selected>按周</option><option value="month">按月</option><option value="quarter">按季</option></select>
+  <select id="group"><option value="">全部群</option></select>
+  <button id="reload">刷新</button>
+  <span class="muted" id="meta"></span>
+</div>
+<div id="status"></div>
+<div class="wrap">
+  <canvas id="graph"></canvas>
+  <div id="side">
+    <div class="panel"><h3>图例</h3>
+      <table>
+        <tr><td>节点大小</td><td class="muted">发言量</td></tr>
+        <tr><td>边的箭头</td><td class="muted">互动方向（发起 → 接收）</td></tr>
+        <tr><td>边的粗细</td><td class="muted">证据条数</td></tr>
+      </table>
+      <div class="note">本图只反映 @/回复/引用等可观测互动，<b>不构成亲密度或影响力评价</b>。</div>
+    </div>
+    <div class="panel"><h3>选中节点</h3><div id="detail" class="muted">点击节点查看详情</div></div>
+    <div class="panel"><h3>最强连接（按证据量）</h3><div id="top" class="muted">—</div></div>
+  </div>
+</div>
+<div id="tip"></div>
+
+<script>
+(function () {
+  function onBridge(cb) {
+    if (window.AstrBotPluginView) { cb(window.AstrBotPluginView); return; }
+    var n = 0, t = setInterval(function () {
+      if (window.AstrBotPluginView) { clearInterval(t); cb(window.AstrBotPluginView); }
+      else if (++n > 150) { clearInterval(t); status("插件桥接脚本未加载，请刷新", true); }
+    }, 20);
+  }
+  function status(m, e) { var el = document.getElementById("status"); el.textContent = m || ""; }
+  function applyTheme(b) {
+    var ctx = b.getContext && b.getContext();
+    var dark = ctx && ctx.isDark;
+    if (dark === undefined || dark === null) dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888"; }
+
+  var bridge = null, nodes = [], edges = [], sim = null, selected = null;
+
+  onBridge(function (b) {
+    bridge = b;
+    applyTheme(b);
+    b.onContext(function () { applyTheme(b); draw(); });
+
+    // 群下拉（来自 overview）
+    b.apiGet("overview", {}).then(function (d) {
+      var sel = document.getElementById("group");
+      (d.groups || []).forEach(function (g) {
+        var o = document.createElement("option");
+        o.value = g.id;
+        o.textContent = (g.group_name || g.group_id);
+        sel.appendChild(o);
+      });
+    }).catch(function () {});
+
+    document.getElementById("reload").onclick = load;
+    document.getElementById("window").onchange = load;
+    document.getElementById("group").onchange = load;
+    canvasSetup();
+    load();
+  });
+
+  function load() {
+    if (!bridge) return;
+    status("");
+    var params = { window: document.getElementById("window").value };
+    var g = document.getElementById("group").value;
+    if (g) params.group = g;
+    bridge.apiGet("network", params).then(function (d) {
+      document.getElementById("meta").textContent =
+        "窗口：" + d.window_label + "｜节点 " + (d.nodes || []).length + "｜边 " + (d.edges || []).length;
+      buildGraph(d);
+      renderTop(d.edges || []);
+      if (!(d.nodes || []).length) status("该窗口内没有互动记录");
+    }).catch(function (e) { status("加载失败：" + (e && e.message ? e.message : e), true); });
+  }
+
+  function buildGraph(d) {
+    nodes = (d.nodes || []).map(function (n, i) {
+      var angle = (i / Math.max(1, d.nodes.length)) * Math.PI * 2;
+      return {
+        id: n.id, label: n.current_nickname || n.user_id || String(n.id),
+        user: n.user_id, msgs: n.message_count || 0,
+        x: 300 + Math.cos(angle) * 160, y: 230 + Math.sin(angle) * 160, vx: 0, vy: 0
+      };
+    });
+    var byId = {}; nodes.forEach(function (n) { byId[n.id] = n; });
+    edges = (d.edges || []).map(function (e) {
+      return { s: byId[e.from_member], t: byId[e.to_member], e: e };
+    }).filter(function (e) { return e.s && e.t; });
+    selected = null;
+    document.getElementById("detail").className = "muted";
+    document.getElementById("detail").textContent = "点击节点查看详情";
+    startSim();
+  }
+
+  function renderTop(edges) {
+    var top = edges.slice().sort(function (a, b) { return b.evidence_count - a.evidence_count; }).slice(0, 5);
+    var el = document.getElementById("top");
+    if (!top.length) { el.className = "muted"; el.textContent = "—"; return; }
+    var byId = {}; nodes.forEach(function (n) { byId[n.id] = n; });
+    el.className = "";
+    el.innerHTML = top.map(function (e) {
+      var s = byId[e.from_member], t = byId[e.to_member];
+      return "<table><tr><td>" + (s ? s.label : e.from_member) + " → " +
+        (t ? t.label : e.to_member) + "</td><td style='text-align:right'>" +
+        e.evidence_count + " 次</td></tr></table>";
+    }).join("");
+  }
+
+  // ---- canvas 与力导向模拟 ----------------------------------------
+  var canvas, cxt, dpr = 1, hover = null;
+
+  function canvasSetup() {
+    canvas = document.getElementById("graph");
+    cxt = canvas.getContext("2d");
+    resize();
+    window.addEventListener("resize", resize);
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("mouseleave", function () { hover = null; document.getElementById("tip").style.display = "none"; });
+    canvas.addEventListener("click", onClick);
+  }
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    var r = canvas.getBoundingClientRect();
+    canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+    cxt.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+  function pos(n) {
+    var r = canvas.getBoundingClientRect();
+    return { x: n.x / 600 * r.width, y: n.y / 460 * r.height };
+  }
+  function hit(mx, my) {
+    for (var i = nodes.length - 1; i >= 0; i--) {
+      var p = pos(nodes[i]), r = radius(nodes[i]) + 4;
+      if ((p.x - mx) * (p.x - mx) + (p.y - my) * (p.y - my) <= r * r) return nodes[i];
+    }
+    return null;
+  }
+  function onMove(ev) {
+    var r = canvas.getBoundingClientRect();
+    var mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    hover = hit(mx, my);
+    canvas.style.cursor = hover ? "pointer" : "grab";
+    var tip = document.getElementById("tip");
+    if (hover) {
+      tip.style.display = "block";
+      tip.style.left = (ev.clientX + 12) + "px";
+      tip.style.top = (ev.clientY + 12) + "px";
+      tip.innerHTML = "<b>" + hover.label + "</b><br>发言 " + hover.msgs + " 条<br><span class='muted'>点击查看详情</span>";
+    } else tip.style.display = "none";
+  }
+  function onClick(ev) {
+    var r = canvas.getBoundingClientRect();
+    var n = hit(ev.clientX - r.left, ev.clientY - r.top);
+    if (!n) return;
+    selected = n;
+    var out = edges.filter(function (e) { return e.s === n; });
+    var inn = edges.filter(function (e) { return e.t === n; });
+    var el = document.getElementById("detail");
+    el.className = "";
+    el.innerHTML = "<b>" + n.label + "</b> <span class='muted'>(" + n.user + ")</span><br>" +
+      "发言 " + n.msgs + " 条<br>发起互动 " + out.length + " 条｜收到互动 " + inn.length + " 条" +
+      (out.length ? "<br><span class='muted'>发出：</span>" + out.slice(0, 5).map(function (e) {
+        return "<br>→ " + e.t.label + "（" + e.e.evidence_count + " 次）";
+      }).join("") : "") +
+      (inn.length ? "<br><span class='muted'>收到：</span>" + inn.slice(0, 5).map(function (e) {
+        return "<br>← " + e.s.label + "（" + e.e.evidence_count + " 次）";
+      }).join("") : "");
+    draw();
+  }
+  function radius(n) { return 7 + Math.min(18, Math.sqrt(n.msgs || 1) * 2); }
+
+  function startSim() {
+    if (sim) cancelAnimationFrame(sim);
+    var ticks = 0;
+    (function step() {
+      tick();
+      draw();
+      if (++ticks < 600) sim = requestAnimationFrame(step);
+      else sim = null;
+    })();
+  }
+  function tick() {
+    var i, j, a, b;
+    // 斥力
+    for (i = 0; i < nodes.length; i++) for (j = i + 1; j < nodes.length; j++) {
+      a = nodes[i]; b = nodes[j];
+      var dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy || 1;
+      var f = 2600 / d2;
+      var d = Math.sqrt(d2);
+      a.vx += dx / d * f; a.vy += dy / d * f;
+      b.vx -= dx / d * f; b.vy -= dy / d * f;
+    }
+    // 弹簧（有边的更近）
+    edges.forEach(function (e) {
+      var dx = e.t.x - e.s.x, dy = e.t.y - e.s.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+      var f = (d - 110) * 0.015;
+      e.s.vx += dx / d * f; e.s.vy += dy / d * f;
+      e.t.vx -= dx / d * f; e.t.vy -= dy / d * f;
+    });
+    // 向心 + 限速 + 积分
+    for (i = 0; i < nodes.length; i++) {
+      a = nodes[i];
+      a.vx += (300 - a.x) * 0.002; a.vy += (230 - a.y) * 0.002;
+      a.vx *= 0.85; a.vy *= 0.85;
+      a.x = Math.max(24, Math.min(576, a.x + a.vx));
+      a.y = Math.max(24, Math.min(436, a.y + a.vy));
+    }
+  }
+  function draw() {
+    if (!cxt) return;
+    var r = canvas.getBoundingClientRect();
+    cxt.clearRect(0, 0, r.width, r.height);
+    var fg = cssVar("--fg"), muted = cssVar("--muted"), accent = cssVar("--accent"), border = cssVar("--border");
+    // 边
+    edges.forEach(function (e) {
+      var s = pos(e.s), t = pos(e.t);
+      var w = Math.min(6, 1 + (e.e.evidence_count || 1) * 0.4);
+      var dim = selected && e.s !== selected && e.t !== selected;
+      cxt.globalAlpha = dim ? 0.15 : 0.75;
+      cxt.strokeStyle = accent; cxt.lineWidth = w;
+      cxt.beginPath(); cxt.moveTo(s.x, s.y); cxt.lineTo(t.x, t.y); cxt.stroke();
+      // 箭头
+      var ang = Math.atan2(t.y - s.y, t.x - s.x);
+      var rr = radius(e.t) + 2;
+      var ax = t.x - Math.cos(ang) * rr, ay = t.y - Math.sin(ang) * rr;
+      cxt.beginPath();
+      cxt.moveTo(ax, ay);
+      cxt.lineTo(ax - Math.cos(ang - 0.4) * 9, ay - Math.sin(ang - 0.4) * 9);
+      cxt.lineTo(ax - Math.cos(ang + 0.4) * 9, ay - Math.sin(ang + 0.4) * 9);
+      cxt.closePath(); cxt.fillStyle = accent; cxt.fill();
+    });
+    cxt.globalAlpha = 1;
+    // 节点
+    nodes.forEach(function (n) {
+      var p = pos(n), rr = radius(n);
+      cxt.beginPath(); cxt.arc(p.x, p.y, rr, 0, Math.PI * 2);
+      cxt.fillStyle = n === selected ? accent : (n === hover ? accent : border);
+      cxt.globalAlpha = n === selected || n === hover ? 1 : 0.9;
+      cxt.fill(); cxt.globalAlpha = 1;
+      cxt.lineWidth = 1.5; cxt.strokeStyle = accent; cxt.stroke();
+      cxt.fillStyle = fg; cxt.font = "11px sans-serif"; cxt.textAlign = "center";
+      cxt.fillText(n.label, p.x, p.y + rr + 13);
+      cxt.fillStyle = muted; cxt.font = "10px sans-serif";
+      cxt.fillText(String(n.msgs), p.x, p.y + 3);
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -67,6 +67,14 @@ class Main(Star):
         self._started = False
         self._rejected = 0
         self._init_errors = 0
+        # Phase 5：注册 WebUI 扩展 API（重复注册会替换，热重载安全）
+        try:
+            from .groupscope.web.api import register_web_api
+
+            register_web_api(self)
+        except Exception:
+            if getattr(self, "logger", None):
+                self.logger.exception("注册 GroupScope Web API 失败")
 
     # ------------------------------------------------------------------
     # 生命周期

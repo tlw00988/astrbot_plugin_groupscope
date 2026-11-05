@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GroupScope 总览</title>
+<style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--card:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e}
+html[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--card:#161b22;--accent:#2f81f7;--ok:#3fb950;--warn:#d29922;--err:#f85149}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:18px;margin:0 0 4px}
+h2{font-size:14px;margin:20px 0 8px;color:var(--muted);font-weight:600}
+.sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+.card .v{font-size:22px;font-weight:650}
+.card .k{font-size:12px;color:var(--muted)}
+.tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;border:1px solid var(--border);color:var(--muted);margin-left:6px}
+.tag.on{color:var(--ok);border-color:var(--ok)}
+.tag.off{color:var(--warn);border-color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500;font-size:12px}
+.chart{display:flex;align-items:flex-end;gap:6px;height:110px;padding:8px;background:var(--card);border:1px solid var(--border);border-radius:8px}
+.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px;min-width:0}
+.bar i{display:block;width:100%;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.85}
+.bar span{font-size:10px;color:var(--muted);white-space:nowrap}
+.bar b{font-size:10px;font-weight:500}
+.muted{color:var(--muted)}
+#status{font-size:12px;min-height:18px;margin-bottom:8px}
+#status.err{color:var(--err)}
+.kv{font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:14px;margin-top:10px}
+code{background:var(--card);border:1px solid var(--border);border-radius:4px;padding:0 4px;font-size:12px}
+</style>
+</head>
+<body>
+<h1>GroupScope 群聊观察与数字档案 <span id="cap"></span></h1>
+<div class="sub" id="sub">加载中…</div>
+<div id="status"></div>
+
+<div class="grid" id="cards"></div>
+
+<h2>近 7 天消息量</h2>
+<div class="chart" id="chart"><span class="muted" style="font-size:12px">暂无数据</span></div>
+
+<h2>已采集的群</h2>
+<table id="groups"><thead><tr><th>群</th><th>平台</th><th>群 ID</th><th>采集</th></tr></thead><tbody></tbody></table>
+
+<h2>分析管线</h2>
+<div class="card" id="pipeline" style="font-size:13px">—</div>
+
+<div class="kv" id="foot"></div>
+
+<script>
+(function () {
+  function onBridge(cb) {
+    if (window.AstrBotPluginView) { cb(window.AstrBotPluginView); return; }
+    var n = 0, t = setInterval(function () {
+      if (window.AstrBotPluginView) { clearInterval(t); cb(window.AstrBotPluginView); }
+      else if (++n > 150) { clearInterval(t); status("插件桥接脚本未加载，请刷新", true); }
+    }, 20);
+  }
+  function status(msg, isErr) {
+    var el = document.getElementById("status");
+    el.textContent = msg || "";
+    el.className = isErr ? "err" : "";
+  }
+  function applyTheme(b) {
+    var ctx = b.getContext && b.getContext();
+    var dark = ctx && ctx.isDark;
+    if (dark === undefined || dark === null) dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+  function fmtSize(n) {
+    if (!n) return "0 B";
+    var u = ["B", "KB", "MB", "GB"], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(1) + " " + u[i];
+  }
+  function fmtTs(ts) {
+    if (!ts) return "-";
+    var d = new Date(ts * 1000);
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function card(k, v, tag) {
+    return '<div class="card"><div class="k">' + k + (tag || "") + '</div><div class="v">' + v + "</div></div>";
+  }
+
+  onBridge(function (b) {
+    applyTheme(b);
+    b.onContext(function () { applyTheme(b); });
+    b.apiGet("overview", {}).then(function (d) {
+      document.getElementById("cap").innerHTML =
+        '<span class="tag ' + (d.capture_enabled ? "on" : "off") + '">采集' + (d.capture_enabled ? "开" : "关") + "</span>" +
+        '<span class="tag ' + (d.analysis_enabled ? "on" : "off") + '">AI 分析' + (d.analysis_enabled ? "开" : "关") + "</span>";
+      document.getElementById("sub").textContent =
+        "原始消息只追加保存；AI 结论为推断，均可回溯证据消息。数据更新于 " + fmtTs(d.server_time) + "（本地时区）";
+
+      var today = d.daily && d.daily.length ? d.daily[d.daily.length - 1].count : 0;
+      document.getElementById("cards").innerHTML =
+        card("消息总数", d.messages.toLocaleString()) +
+        card("今日新增", today.toLocaleString()) +
+        card("群数量", (d.groups || []).length) +
+        card("成员数量", d.members.toLocaleString()) +
+        card("通知/事件", d.notices.toLocaleString()) +
+        card("数据库大小", fmtSize(d.db_size_bytes));
+
+      // 每日柱状图
+      var daily = d.daily || [];
+      if (daily.length) {
+        var max = Math.max.apply(null, daily.map(function (x) { return x.count; }));
+        document.getElementById("chart").innerHTML = daily.map(function (x) {
+          var h = max ? Math.max(3, Math.round(x.count / max * 80)) : 2;
+          return '<div class="bar"><b>' + x.count + '</b><i style="height:' + h + 'px"></i><span>' + x.day.slice(5) + "</span></div>";
+        }).join("");
+      }
+
+      // 群列表
+      var tb = document.querySelector("#groups tbody");
+      tb.innerHTML = (d.groups || []).map(function (g) {
+        var name = g.group_name || g.group_id;
+        return "<tr><td>" + name + "</td><td>" + (g.platform_name || g.platform_id || "-") +
+          "</td><td><code>" + g.group_id + "</code></td><td>" +
+          (g.capture_enabled ? "✅" : "⏸️") + "</td></tr>";
+      }).join("") || '<tr><td colspan="4" class="muted">尚无群数据</td></tr>';
+
+      // 分析管线
+      var t = d.tasks || {}, gw = d.gateway || {};
+      var pv = d.prompt_versions || {};
+      document.getElementById("pipeline").innerHTML =
+        (gw.enabled
+          ? "LLM 分析：<b>开</b>｜调用 " + gw.calls + "｜错误 " + gw.errors +
+            "｜今日剩余 " + (gw.remaining_today < 0 ? "不限" : gw.remaining_today)
+          : "LLM 分析：<b>关</b>（仅规则层运行，零 LLM 成本）") +
+        "<br>任务队列：待处理 " + (t.pending || 0) + "｜处理中 " + (t.running || 0) +
+        "｜完成 " + (t.done || 0) + "｜失败 " + (t.failed || 0) +
+        "｜规则任务 " + (gw.rule_tasks || 0) + "｜LLM 任务 " + (gw.llm_tasks || 0) +
+        "<br>提示词版本：" + (Object.keys(pv).length
+          ? Object.keys(pv).map(function (k) { return "<code>" + k + "=" + pv[k] + "</code>"; }).join(" ")
+          : "—");
+
+      document.getElementById("foot").innerHTML =
+        "<span>指令入口：<code>/gs help</code>（需管理员）</span>" +
+        "<span>关系图与档案见本插件其他视图</span>" +
+        "<span>所有 AI 结论均非事实，以证据消息为准</span>";
+    }).catch(function (e) {
+      status("加载失败：" + (e && e.message ? e.message : e), true);
+    });
+  });
+})();
+</script>
+</body>
+</html>

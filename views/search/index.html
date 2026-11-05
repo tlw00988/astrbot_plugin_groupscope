@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GroupScope 消息检索</title>
+<style>
+:root{--bg:#ffffff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--card:#f6f8fa;--accent:#0969da;--err:#cf222e}
+html[data-theme=dark]{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--card:#161b22;--accent:#2f81f7;--err:#f85149}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+.bar-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+input,select{background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px}
+input{min-width:240px}
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer}
+#status{font-size:12px;min-height:18px;color:var(--err)}
+.wrap{display:flex;gap:12px;flex-wrap:wrap}
+#results{flex:1 1 340px;max-height:600px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:6px}
+.row{padding:8px 9px;border-bottom:1px solid var(--border);cursor:pointer}
+.row:hover,.row.on{background:var(--accent);color:#fff}
+.row .meta{font-size:11px;opacity:.75}
+.row .txt{font-size:13px;white-space:pre-wrap;word-break:break-word}
+#detail{flex:1 1 360px;min-width:300px}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.panel h3{margin:0 0 6px;font-size:13px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td,th{padding:5px 4px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.muted{color:var(--muted)}
+.msg{cursor:pointer;padding:4px 2px;border-bottom:1px dashed var(--border)}
+.msg:hover{color:var(--accent)}
+.hl{background:#ffe58f;color:#000;border-radius:3px;padding:0 2px}
+html[data-theme=dark] .hl{background:#7a5d00;color:#fff}
+.note{font-size:12px;color:var(--muted);border-left:3px solid var(--accent);padding-left:8px;margin-top:6px}
+.empty{color:var(--muted);font-size:13px;padding:8px 0}
+</style>
+</head>
+<body>
+<h1>消息检索</h1>
+<div class="sub">检索的是<b>原始消息存档</b>（含完整消息段），不做任何改写；点击结果查看上下文。</div>
+<div class="bar-row">
+  <input id="q" placeholder="关键词，如：爬山">
+  <select id="group"><option value="">全部群</option></select>
+  <button id="search">搜索</button>
+  <span class="muted" id="count"></span>
+</div>
+<div id="status"></div>
+<div class="wrap">
+  <div id="results"><div class="empty" style="padding:8px">输入关键词搜索，留空则列出最近消息</div></div>
+  <div id="detail"><div class="panel"><div class="empty">← 点击左侧消息查看原消息与上下文</div></div></div>
+</div>
+
+<script>
+(function () {
+  function onBridge(cb) {
+    if (window.AstrBotPluginView) { cb(window.AstrBotPluginView); return; }
+    var n = 0, t = setInterval(function () {
+      if (window.AstrBotPluginView) { clearInterval(t); cb(window.AstrBotPluginView); }
+      else if (++n > 150) { clearInterval(t); status("插件桥接脚本未加载，请刷新"); }
+    }, 20);
+  }
+  function status(m) { document.getElementById("status").textContent = m || ""; }
+  function applyTheme(b) {
+    var ctx = b.getContext && b.getContext();
+    var dark = ctx && ctx.isDark;
+    if (dark === undefined || dark === null) dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function fmtTs(ts) {
+    if (!ts) return "-";
+    var d = new Date(ts * 1000);
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function hl(text, q) {
+    var s = esc(text);
+    if (!q) return s;
+    try {
+      var re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      return s.replace(re, function (m) { return '<span class="hl">' + m + "</span>"; });
+    } catch (e) { return s; }
+  }
+  var bridge = null, currentId = null;
+
+  onBridge(function (b) {
+    bridge = b;
+    applyTheme(b);
+    b.onContext(function () { applyTheme(b); });
+    b.apiGet("overview", {}).then(function (d) {
+      var sel = document.getElementById("group");
+      (d.groups || []).forEach(function (g) {
+        var o = document.createElement("option");
+        o.value = g.id;
+        o.textContent = g.group_name || g.group_id;
+        sel.appendChild(o);
+      });
+    }).catch(function () {});
+    document.getElementById("search").onclick = load;
+    document.getElementById("q").onkeydown = function (e) { if (e.key === "Enter") load(); };
+    load();
+  });
+
+  function load() {
+    if (!bridge) return;
+    status("");
+    var params = { limit: 50 };
+    var q = document.getElementById("q").value.trim();
+    if (q) params.q = q;
+    var g = document.getElementById("group").value;
+    if (g) params.group = g;
+    bridge.apiGet("messages", params).then(function (d) {
+      var items = d.items || [];
+      document.getElementById("count").textContent = items.length + " 条";
+      var el = document.getElementById("results");
+      if (!items.length) {
+        el.innerHTML = '<div class="empty" style="padding:8px">没有匹配的消息（关键词需完全命中）</div>';
+        return;
+      }
+      el.innerHTML = items.map(function (m) {
+        return '<div class="row" data-id="' + m.id + '"><div class="meta">#' + m.id + " · " +
+          fmtTs(m.sent_at) + " · " + esc(m.sender || "?") + " · 群 " + esc(m.group) + "</div>" +
+          '<div class="txt">' + hl(m.text || "(无文本)", q) + "</div></div>";
+      }).join("");
+      Array.prototype.forEach.call(el.querySelectorAll(".row"), function (node) {
+        node.onclick = function () {
+          Array.prototype.forEach.call(el.querySelectorAll(".row"), function (x) { x.classList.remove("on"); });
+          node.classList.add("on");
+          showMessage(parseInt(node.dataset.id, 10));
+        };
+      });
+    }).catch(function (e) { status("搜索失败：" + (e && e.message ? e.message : e)); });
+  }
+
+  function showMessage(id) {
+    currentId = id;
+    bridge.apiGet("message/" + id, {}).then(function (d) {
+      if (currentId !== id) return;
+      var m = d.message;
+      var segs = (d.segments || []).map(function (s) {
+        return "<tr><td>#" + s.seg_index + "</td><td>" + esc(s.seg_type) + "</td><td>" +
+          esc((s.text || s.payload_json || "").slice(0, 160)) + "</td></tr>";
+      }).join("");
+      var ctxRows = function (arr) {
+        return (arr || []).map(function (r) {
+          return '<div class="msg" data-mid="' + r.id + '">' + fmtTs(r.sent_at) + " [" +
+            esc(r.sender_raw_name || r.sender_raw_id || "?") + "] " + esc((r.text || "").slice(0, 80)) + "</div>";
+        }).join("");
+      };
+      document.getElementById("detail").innerHTML =
+        '<div class="panel"><h3>原消息 #' + m.id + "</h3>" +
+        '<div class="muted">' + fmtTs(m.sent_at) + " ｜ " + esc(m.sender_raw_name || m.sender_raw_id) +
+        " ｜ 群 " + esc(m.group_raw_id) + " ｜ 类型 " + esc(m.message_type) +
+        (m.reply_to_sender_id ? " ｜ 回复对象 " + m.reply_to_sender_id : "") + "</div>" +
+        '<div style="margin:6px 0;white-space:pre-wrap;word-break:break-word">' + esc(m.text || "(无文本)") + "</div>" +
+        (segs ? "<h3>完整消息段（原始结构）</h3><table><tr><th>#</th><th>类型</th><th>内容</th></tr>" + segs + "</table>" : "") +
+        "</div>" +
+        '<div class="panel"><h3>前文 5 条</h3>' + (ctxRows(d.before) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="panel"><h3>后文 5 条</h3>' + (ctxRows(d.after) || '<div class="empty">无</div>') + "</div>" +
+        '<div class="note">原始消息只追加保存；AI 分析的“证据消息”会指回这里的消息 ID。</div>';
+      Array.prototype.forEach.call(document.querySelectorAll("#detail .msg"), function (node) {
+        node.onclick = function () { showMessage(parseInt(node.dataset.mid, 10)); };
+      });
+    }).catch(function (e) { status("加载消息失败：" + (e && e.message ? e.message : e)); });
+  }
+})();
+</script>
+</body>
+</html>
