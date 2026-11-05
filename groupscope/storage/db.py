@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
@@ -65,11 +66,21 @@ class Database:
         self._conn = None
         if conn is None:
             return
+        worker = getattr(conn, "_thread", None)
+        if worker is not None and not worker.is_alive():
+            # aiosqlite 工作线程已死（异常路径），任何 await 都不会返回，
+            # 这里只能放弃优雅关闭，交由 GC 处理，绝不让停机流程挂死。
+            return
         try:
-            await conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await asyncio.wait_for(
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)"), 5.0
+            )
         except Exception:
             pass
-        await conn.close()
+        try:
+            await asyncio.wait_for(conn.close(), 5.0)
+        except Exception:
+            pass
 
     async def quick_check(self) -> str:
         cur = await self.conn.execute("PRAGMA quick_check(1)")

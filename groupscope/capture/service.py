@@ -49,6 +49,7 @@ class CaptureService:
         self._tasks: list[asyncio.Task] = []
         self._idle = asyncio.Event()
         self._idle.set()
+        self._stop_event = asyncio.Event()
         self._started = False
         self._stopping = False
 
@@ -59,10 +60,11 @@ class CaptureService:
             return
         try:
             paused = await repo.paused_groups(self.db.conn)
-            self.policy.paused_group_refs = set(paused)
+            self.policy.paused = set(paused)
         except Exception:
             self.log.exception("加载暂停群列表失败")
         self._stopping = False
+        self._stop_event = asyncio.Event()
         self._tasks = [
             asyncio.create_task(self._writer_loop(), name="groupscope-writer"),
             asyncio.create_task(self._maintenance_loop(), name="groupscope-maint"),
@@ -72,9 +74,17 @@ class CaptureService:
             self.log.info("采集服务已启动（队列上限 %s）", self.queue.maxsize)
 
     async def stop(self, timeout: float = 8.0) -> None:
+        """协作式停机：排空写入队列并等待后台任务自行退出。
+
+        维护任务**不能硬 cancel**——它可能正阻塞在 SQL future 上；丢弃该
+        future 会让 aiosqlite 工作线程在通知（已关闭的）事件循环时抛异常而
+        死亡，之后所有数据库操作都会永久挂起。因此只发停机信号，等它回到
+        可中断的等待点自然退出。
+        """
         if not self._started:
             return
         self._stopping = True
+        self._stop_event.set()
         self._enqueue_sentinel()
         writer = next(
             (t for t in self._tasks if t.get_name() == "groupscope-writer"), None
@@ -89,12 +99,19 @@ class CaptureService:
                 except (asyncio.CancelledError, Exception):
                     pass
         for task in self._tasks:
-            if not task.done():
+            if task is writer or task.done():
+                continue
+            try:
+                # 先给协作退出的机会；确实卡住才强制取消
+                await asyncio.wait_for(asyncio.shield(task), 3.0)
+            except (asyncio.TimeoutError, TimeoutError):
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+            except (asyncio.CancelledError, Exception):
+                pass
         self._tasks = []
         self._started = False
         self.log.info("采集服务已停止（已写入 %s 条）", self.metrics["written"])
@@ -168,8 +185,9 @@ class CaptureService:
             self.log.debug("写入批次 %s 条（新增 %s）", len(batch), inserted)
 
     async def _writer_loop(self) -> None:
+        # 注意：不在循环顶部清 _idle——空闲标志由 enqueue 清除、由写者在
+        # 队列排空后置位，写者阻塞等待新消息时必须保持“空闲”可见。
         while True:
-            self._idle.clear()
             try:
                 batch, stop = await self._collect()
             except asyncio.CancelledError:
@@ -189,10 +207,21 @@ class CaptureService:
     # -- 例行维护 ---------------------------------------------------
 
     async def _maintenance_loop(self) -> None:
-        last_backup_day = await self._last_backup_day()
+        try:
+            last_backup_day = await self._last_backup_day()
+        except Exception:
+            last_backup_day = ""
         while True:
             try:
-                await asyncio.sleep(3600)
+                # 用停机事件代替 sleep：既能按小时唤醒，也能被 stop() 立即打断，
+                # 且不会在 SQL 执行到一半时被取消（避免遗留孤儿 future）。
+                await asyncio.wait_for(self._stop_event.wait(), 3600)
+                break  # 收到停机信号
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+            except asyncio.CancelledError:
+                break
+            try:
                 if self.settings.log_retention_days > 0:
                     deleted = await repo.retention_purge(
                         self.db.conn, self.settings.log_retention_days

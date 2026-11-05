@@ -113,7 +113,7 @@ def _raw_json(raw: Any) -> str | None:
     return text
 
 
-def _notice_info(msg: AstrBotMessage) -> tuple[bool, str | None]:
+def notice_info(msg: AstrBotMessage) -> tuple[bool, str | None]:
     raw = msg.raw_message
     if isinstance(raw, Mapping):
         notice_type = raw.get("notice_type")
@@ -168,7 +168,7 @@ def normalize_event(event: AstrMessageEvent) -> NormalizedMessage | None:
         if sender_name is not None:
             sender_name = str(sender_name) or None
 
-    is_notice, notice_type = _notice_info(msg)
+    is_notice, notice_type = notice_info(msg)
 
     sent_at = int(getattr(msg, "timestamp", 0) or 0) or received_at
 

@@ -284,14 +284,32 @@ async def daily_counts(
     return [{"day": row["day"], "count": int(row["c"])} for row in await cur.fetchall()]
 
 
-async def group_ref_of(conn: aiosqlite.Connection, platform: str, gid: str) -> int | None:
-    cur = await conn.execute(
-        "SELECT id FROM groups WHERE (group_id=? OR platform_id || ':' || group_id=?)"
-        " ORDER BY last_seen DESC LIMIT 1",
-        (gid, f"{platform}:{gid}"),
-    )
+async def find_group(
+    conn: aiosqlite.Connection, entry: str
+) -> dict[str, Any] | None:
+    """按 ``群ID`` 或 ``平台:群ID`` 查找群记录。"""
+    from ..privacy import split_entry
+
+    plat, gid = split_entry(entry)
+    if not gid:
+        return None
+    if plat:
+        cur = await conn.execute(
+            "SELECT id, platform_id, platform_name, group_id, group_name,"
+            " capture_enabled FROM groups"
+            " WHERE group_id=? AND (platform_id=? OR platform_name=?)"
+            " ORDER BY last_seen DESC LIMIT 1",
+            (gid, plat, plat),
+        )
+    else:
+        cur = await conn.execute(
+            "SELECT id, platform_id, platform_name, group_id, group_name,"
+            " capture_enabled FROM groups WHERE group_id=?"
+            " ORDER BY last_seen DESC LIMIT 1",
+            (gid,),
+        )
     row = await cur.fetchone()
-    return int(row["id"]) if row else None
+    return dict(row) if row else None
 
 
 async def recent_messages(
@@ -357,11 +375,12 @@ async def set_group_capture(
     )
 
 
-async def paused_groups(conn: aiosqlite.Connection) -> list[int]:
+async def paused_groups(conn: aiosqlite.Connection) -> list[tuple[str, str]]:
+    """返回暂停采集的 ``(platform_id, group_id)`` 集合元素。"""
     cur = await conn.execute(
-        "SELECT id FROM groups WHERE capture_enabled=0"
+        "SELECT platform_id, group_id FROM groups WHERE capture_enabled=0"
     )
-    return [int(row["id"]) for row in await cur.fetchall()]
+    return [(str(row["platform_id"]), str(row["group_id"])) for row in await cur.fetchall()]
 
 
 async def retention_purge(conn: aiosqlite.Connection, days: int) -> int:
