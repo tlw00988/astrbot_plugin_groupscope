@@ -85,5 +85,48 @@
     "type": "bool",
     "default": false,
     "hint": "排障用，正常运行建议关闭以免日志膨胀。"
+  },
+  "analysis_enabled": {
+    "description": "启用 AI 分析（称呼/话题/事件）",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后仅运行规则层（零 LLM 成本），历史数据保留。"
+  },
+  "llm_provider_id": {
+    "description": "分析使用的对话模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "留空则使用 AstrBot 的第一个可用模型。插件不保存任何 API Key，完全复用 AstrBot 已配置的服务商。"
+  },
+  "analysis_concurrency": {
+    "description": "LLM 并发上限",
+    "type": "int",
+    "default": 1,
+    "hint": "插件侧限流，避免分析任务挤占聊天请求。"
+  },
+  "analysis_interval_ms": {
+    "description": "LLM 最小调用间隔(ms)",
+    "type": "int",
+    "default": 1500,
+    "hint": "两次分析调用之间的最小间隔。"
+  },
+  "analysis_daily_limit": {
+    "description": "每日 LLM 调用上限",
+    "type": "int",
+    "default": 200,
+    "hint": "0 表示不限制。达到上限后当天不再发起分析调用。"
+  },
+  "analysis_window_hours": {
+    "description": "每次分析的回溯窗口(小时)",
+    "type": "int",
+    "default": 24,
+    "hint": "分析任务只处理该时间窗内的消息，避免单次上下文过长。"
+  },
+  "analysis_batch_size": {
+    "description": "单次任务处理条数",
+    "type": "int",
+    "default": 3,
+    "hint": "后台分析循环每轮最多处理的任务数。"
   }
 }

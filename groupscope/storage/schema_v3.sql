@@ -20,9 +20,12 @@ CREATE TABLE IF NOT EXISTS addressing (
   created_at        INTEGER NOT NULL,
   last_seen         INTEGER NOT NULL,
   seen_count        INTEGER NOT NULL DEFAULT 1,
-  reviewed          INTEGER NOT NULL DEFAULT 0,
-  UNIQUE (group_ref, from_member, to_member, address, source)
+  reviewed          INTEGER NOT NULL DEFAULT 0
 );
+-- 用 IFNULL 表达式索引：from/to 可能为空（未识别到对象），SQLite 的 NULL
+-- 在唯一约束里互不相等，直接用列会导致重复行。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_addressing
+  ON addressing(group_ref, IFNULL(from_member,-1), IFNULL(to_member,-1), address, source);
 CREATE INDEX IF NOT EXISTS idx_addressing_to     ON addressing(to_member, address);
 CREATE INDEX IF NOT EXISTS idx_addressing_group  ON addressing(group_ref, last_seen);
 CREATE INDEX IF NOT EXISTS idx_addressing_addr   ON addressing(address);

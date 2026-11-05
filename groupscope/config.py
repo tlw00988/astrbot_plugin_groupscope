@@ -79,3 +79,34 @@ class CaptureSettings:
             backup_keep=max(1, _as_int(conf.get("backup_keep"), 7)),
             log_detail=_as_bool(conf.get("log_detail"), False),
         )
+
+
+@dataclass
+class AnalysisSettings:
+    """Phase 3 分析配置（LLM 完全复用 AstrBot Provider，本插件不存 Key）。"""
+
+    analysis_enabled: bool = True
+    llm_provider_id: str = ""
+    analysis_concurrency: int = 1
+    analysis_interval_ms: int = 1500
+    analysis_daily_limit: int = 200
+    analysis_window_hours: int = 24
+    analysis_batch_size: int = 3
+
+    @classmethod
+    def from_conf(cls, conf: Any) -> "AnalysisSettings":
+        if not isinstance(conf, dict):
+            conf = {}
+        return cls(
+            analysis_enabled=_as_bool(conf.get("analysis_enabled"), True),
+            llm_provider_id=str(conf.get("llm_provider_id") or "").strip(),
+            analysis_concurrency=max(1, _as_int(conf.get("analysis_concurrency"), 1)),
+            analysis_interval_ms=max(
+                0, _as_int(conf.get("analysis_interval_ms"), 1500)
+            ),
+            analysis_daily_limit=max(0, _as_int(conf.get("analysis_daily_limit"), 200)),
+            analysis_window_hours=max(
+                1, _as_int(conf.get("analysis_window_hours"), 24)
+            ),
+            analysis_batch_size=max(1, _as_int(conf.get("analysis_batch_size"), 3)),
+        )
