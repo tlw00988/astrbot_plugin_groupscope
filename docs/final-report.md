@@ -25,7 +25,7 @@
 
 ## 2. 交付文件列表
 
-`git ls-files` 共 **58 个文件**（本报告为第 59 个）。按目录归类：
+`git ls-files` 共 **64 个文件**。按目录归类：
 
 | 分组 | 文件 |
 | --- | --- |
@@ -242,7 +242,7 @@ cd astrbot_plugin_groupscope && .venv/bin/python -m pytest tests -q
 
 机制：在隔离 `ASTRBOT_ROOT` 里启动**真实 `astrbot run`**，用假 OneBot 客户端反向连接 `ws://127.0.0.1:<port>/ws`（header `X-Client-Role: universal` + `X-Self-ID`）注入事件并应答 API，再起一个 **LLM 陷阱服务**（`/v1/chat/completions`）记录命中次数并按提示词返回"合法" JSON。
 
-**R1（`analysis_enabled=false`，零 LLM 断言）27 项**
+**R1（`analysis_enabled=false`，零 LLM 断言）28 项**
 
 - 入库 4 条（普通 / 引用 / `@` / 通知），重复 `message_id` 去重、notice 标记正确；
 - 白名单外群、被排除成员、私聊 **0 条入库**；
@@ -252,7 +252,7 @@ cd astrbot_plugin_groupscope && .venv/bin/python -m pytest tests -q
 - 规则任务入队并 `done`、规则称呼条目 2 条，**陷阱服务命中 0 次**（规则层 + 非唤醒消息零 LLM）；
 - SIGINT 干净停机：`exit=0`、日志含"GroupScope 已卸载"、`PRAGMA quick_check=ok`。
 
-**R2（`analysis_enabled=true`，真实 LLM 链路）17 项**
+**R2（`analysis_enabled=true`，真实 LLM 链路）16 项**
 
 - 陷阱命中 **3 次（addressing/event/topic）**，3 个 LLM 任务 `done`；
 - `addressing` 出现 `source='llm'` 且证据指向真实消息 id、**没有证据为空的 LLM 结论**；`topics/events source=llm` 各 1 条；
@@ -292,7 +292,6 @@ cd astrbot_plugin_groupscope && .venv/bin/python -m pytest tests -q
 9. **迁移演练不充分**：只测了"迁移幂等 + 重开库版本 = LATEST"；没有"用真实 v1 旧库（带数据）升级到 v5 并对账"的专项用例。
 10. **`analysis_runs` 有表无深度利用**：记录了运行批次，但未提供按 run 回看/回滚单次分析结果的指令或视图。
 11. **无跨群/跨平台聚合分析**：所有分析与视图均按单群维度，未做跨群画像。
-12. **未推送 GitHub**：本地提交链完整，远端同步见 §10（报告撰写时尚未 push）。
 
 ---
 
@@ -305,12 +304,14 @@ cd astrbot_plugin_groupscope && .venv/bin/python -m pytest tests -q
 - **归档文件需自行保管**：`archives/*.db` 是独立库，`purge` 后主库不再有该月原始消息，备份（`backups/`）与归档互为独立保险，需分别留存。
 - **隐私默认最小化**：白名单为空即不采集；但一旦开白名单，原始消息会长期落在本地库中，需自行遵守所在群规与法规，退出删除要靠 `/gs` 数据清理 + 手动删库。
 - **依赖 AstrBot 内部 API**：`register_web_api`、视图自动发现、`AstrBotConfig` 等属 AstrBot 扩展面，跨大版本（≥5）可能需适配（`metadata.yaml` 限定 `>=4.16,<5`）。
+- **无 CI / 无 release**：远端只有 `master` 分支，没有 GitHub Actions 与 tag，单测、冒烟、压测、集成测试都需在本地手动执行。
 
 ---
 
 ## 10. 提交记录
 
-git 身份 `tlw00988 <twlfox@outlook.com>`，`commit.gpgsign=false`。**全部提交尚未 push 到 GitHub。**
+git 身份 `tlw00988 <twlfox@outlook.com>`，`commit.gpgsign=false`。
+远端：**https://github.com/tlw00988/astrbot_plugin_groupscope**（public，`master`），9 个提交已全部推送、工作区干净。
 
 ```
 53b3bbe  Phase 0 技术方案 + Phase 1 骨架（存储/采集/隐私模块，尚未完成）
@@ -328,4 +329,4 @@ f974369  事务串行化修复（tx 锁，杜绝嵌套 BEGIN）+ 端到端集成
 
 ## 11. 一句话结论
 
-**Phase 0–6 功能全部完成并通过 4 类验证（单测 40 / 冒烟 2 条链路 / 压测 4,014 msg/s / 集成 44 断言）；集成测试额外揪出并修复了一个真实并发写入缺陷；未实现项（附件下载、多平台实测、硬崩溃演练、浏览器人工点验、FTS 检索、自动身份合并等 12 条）已在 §8 如实列出。**
+**Phase 0–6 功能全部完成并通过 4 类验证（单测 40 / 冒烟 2 条链路 / 压测 4,014 msg/s / 集成 44 断言）；集成测试额外揪出并修复了一个真实并发写入缺陷；未实现项（附件下载、多平台实测、硬崩溃演练、浏览器人工点验、FTS 检索、自动身份合并等 11 条）已在 §8 如实列出。**
