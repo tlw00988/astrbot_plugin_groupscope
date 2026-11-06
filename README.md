@@ -77,13 +77,17 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 | `/gs merge <主ID> <被合并ID>` | 人工合并重复成员（Phase 2） |
 | `/gs snapshot [群ID] [窗口]` | 立即计算关系快照（Phase 2） |
 | `/gs address [群ID] [关键词]` | 称呼体系查询，标注来源与置信度（Phase 3） |
-| `/gs analyze <群ID> [rule\|llm\|topic\|event\|all]` | 立即入队分析（Phase 3/4） |
+| `/gs analyze <群ID> [rule\|llm\|topic\|event\|all] [since=YYYY-MM-DD] [until=YYYY-MM-DD]` | 入队分析，可指定历史时间范围（Phase 3/4，Phase 6 补范围参数） |
 | `/gs tasks` | 分析任务队列与 LLM 限流状态（Phase 3） |
-| `/gs reanalyze <群ID> [rule\|llm\|topic\|event\|all]` | 按当前提示词版本重新分析（Phase 3/4） |
+| `/gs reanalyze <群ID> [rule\|llm\|topic\|event\|all] [since=...] [until=...]` | 按当前提示词版本重新分析（Phase 3/4，Phase 6 补范围参数） |
 | `/gs alias <成员ID> <称呼> [群ID]` | 人工指定称呼（`manual`，优先级最高）（Phase 3） |
 | `/gs topics` / `/gs topic 1 <ID>` | 话题列表 / 话题证据消息（Phase 4） |
 | `/gs events` / `/gs event 1 <ID>` | 事件与梗 / 首现→传播证据链（Phase 4） |
 | `/gs timeline [群ID] [条数]` | 群体记忆时间线（Phase 4） |
+| `/gs archive <YYYY-MM> [purge]` | 月度归档：仅生成归档库；带 `purge` 才从主库移除该月消息（Phase 6） |
+| `/gs archives` | 归档清单（行数 / 是否 purge / 是否已恢复）（Phase 6） |
+| `/gs unarchive <YYYY-MM>` | 从归档回灌消息（按 dedup_key 去重，可断点续跑）并回链证据（Phase 6） |
+| `/gs verify [YYYY-MM]` | 主库 quick_check + 归档 sha256/行数对账 + SQLite 维护（Phase 6） |
 
 ## WebUI（Phase 5，复用 AstrBot Dashboard）
 
@@ -101,6 +105,23 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 后端接口经 `context.register_web_api` 注册在 `/api/v1/plugins/extensions/astrbot_plugin_groupscope/...`，
 只读（删除类操作只走管理员指令）；视图元数据在 `.astrbot-plugin/i18n/zh-CN.json`。
 
+## 长期运行与数据归档（Phase 6）
+
+- **周期维护**：分析循环每小时执行一次 `requeue_stale(600s)`（回收处理中卡死的任务）
+  + `PRAGMA optimize` + `wal_checkpoint(PASSIVE)`，不阻塞读写。
+- **失败退避**：分析任务失败按 30s×2ⁿ 指数退避（上限 1 小时），避免坏任务空转打满循环；
+  限流（并发/间隔/日配额）退回的任务**不消耗重试次数、不进退避**。
+- **月度归档**：`/gs archive <YYYY-MM>` 生成独立归档库 `archives/messages-YYYY-MM.db`
+  （含该月消息 + 消息段 + @ 记录，行数对账 + sha256），主库不动；
+  `/gs archive <YYYY-MM> purge` 才从主库删除该月消息。
+  - **分析结论不删**：purge 前把话题/事件/称呼的证据指针搬到 `archived_evidence`，
+    消息级证据改指归档库内 id，"证据可回溯"在归档后依然成立。
+  - `/gs unarchive <YYYY-MM>` 按 `dedup_key` 去重回灌（可断点续跑，重复执行只跳过不重复），
+    恢复后自动回链证据；恢复前校验 sha256 + 归档库 `quick_check`，损坏文件拒绝恢复。
+  - `/gs verify [YYYY-MM]` 校验主库与所有归档的一致性。
+- **备份**：`/gs backup`（`VACUUM INTO` 在线一致性备份，自动轮转）与归档互为独立保险，
+  归档文件可单独拷走长期保存。
+
 ## 隐私
 
 - **默认不采集**：白名单为空时插件不记录任何群消息。
@@ -115,9 +136,14 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python astrbot pytest pytest-timeout
 .venv/bin/python -m pytest tests -q        # 单测
+
+# 压力与稳定性测试（隔离的临时 ASTRBOT_ROOT，不碰真实数据）
+.venv/bin/python tools/stress_test.py --count 10000
+.venv/bin/python tools/stress_test.py --count 2000 --archive   # 附带归档全链路演练
 ```
 
-集成测试与压测方法见各阶段交付报告（`docs/`）。
+压测报告含吞吐、队列丢弃、库体积、事件循环延迟（max/p99）与 `quick_check`；
+任一断言失败以退出码 1 结束。集成测试方法见各阶段交付报告（`docs/`）。
 
 ## 许可
 

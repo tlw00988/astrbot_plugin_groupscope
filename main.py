@@ -25,6 +25,7 @@ from .groupscope.capture.service import CaptureService
 from .groupscope.config import AnalysisSettings, CaptureSettings
 from .groupscope.ops import backup as backup_ops
 from .groupscope.ops import export as export_ops
+from .groupscope.ops import archives as archives_ops
 from .groupscope.paths import plugin_data_dir
 from .groupscope.privacy import CapturePolicy
 from .groupscope.social import profiles as social_profiles
@@ -684,6 +685,31 @@ class Main(Star):
     async def _find_group(self, token: str) -> Any:
         return await repo.find_group(self.db.conn, token)
 
+    @staticmethod
+    def _parse_range(args: list[str]) -> tuple[list[str], int | None, int | None]:
+        """从参数中解析 ``since=YYYY-MM-DD`` / ``until=YYYY-MM-DD``。
+
+        返回 ``(剩余参数, since_ts, until_ts)``；``until`` 含当天整天
+        （+86400 秒），日期非法时抛 ``ValueError``（由调用方转成提示）。
+        """
+        rest: list[str] = []
+        since: int | None = None
+        until: int | None = None
+        for a in args:
+            key, sep, val = a.partition("=")
+            if sep and key in ("since", "until") and val:
+                try:
+                    ts = int(time.mktime(time.strptime(val, "%Y-%m-%d")))
+                except ValueError:
+                    raise ValueError(f"日期格式错误: {val}（应为 YYYY-MM-DD）") from None
+                if key == "since":
+                    since = ts
+                else:
+                    until = ts + 86400  # 含当天
+            else:
+                rest.append(a)
+        return rest, since, until
+
     @gs.command("address")
     @filter.permission_type(ADMIN)
     async def gs_address(self, event: AstrMessageEvent):
@@ -746,7 +772,18 @@ class Main(Star):
             return
         args = self._args(event)
         if not args:
-            yield event.plain_result("用法: /gs analyze <群ID> [rule|llm|topic|event|all]")
+            yield event.plain_result(
+                "用法: /gs analyze <群ID> [rule|llm|topic|event|all]"
+                " [since=YYYY-MM-DD] [until=YYYY-MM-DD]"
+            )
+            return
+        try:
+            args, since, until = self._parse_range(args)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+        if not args:
+            yield event.plain_result("缺少群ID。")
             return
         row = await self._find_group(args[0])
         if not row:
@@ -759,13 +796,19 @@ class Main(Star):
         group_ref = int(row["id"])
         enqueued = []
         if mode in ("rule", "all"):
-            if await self.runner.enqueue_rule(group_ref, priority=10):
+            if await self.runner.enqueue_rule(
+                group_ref, since=since, until=until, priority=10
+            ):
                 enqueued.append("规则称呼")
         if mode in ("topic", "all"):
             enqueued += [
                 _KIND_LABELS.get(k, k)
                 for k in await self.runner.enqueue_memory(
-                    group_ref, kinds=(analysis_runner_mod.KIND_TOPIC_RULE,), priority=10
+                    group_ref,
+                    kinds=(analysis_runner_mod.KIND_TOPIC_RULE,),
+                    since=since,
+                    until=until,
+                    priority=10,
                 )
             ]
             if self.gateway is not None:
@@ -774,6 +817,8 @@ class Main(Star):
                     for k in await self.runner.enqueue_memory(
                         group_ref,
                         kinds=(analysis_runner_mod.KIND_TOPIC_LLM,),
+                        since=since,
+                        until=until,
                         priority=10,
                         with_llm=True,
                     )
@@ -782,7 +827,11 @@ class Main(Star):
             enqueued += [
                 _KIND_LABELS.get(k, k)
                 for k in await self.runner.enqueue_memory(
-                    group_ref, kinds=(analysis_runner_mod.KIND_EVENT_RULE,), priority=10
+                    group_ref,
+                    kinds=(analysis_runner_mod.KIND_EVENT_RULE,),
+                    since=since,
+                    until=until,
+                    priority=10,
                 )
             ]
             if self.gateway is not None:
@@ -791,6 +840,8 @@ class Main(Star):
                     for k in await self.runner.enqueue_memory(
                         group_ref,
                         kinds=(analysis_runner_mod.KIND_EVENT_LLM,),
+                        since=since,
+                        until=until,
                         priority=10,
                         with_llm=True,
                     )
@@ -798,14 +849,21 @@ class Main(Star):
         if mode in ("llm", "all"):
             if self.gateway is None:
                 enqueued.append("LLM(未启用/无Provider)")
-            elif await self.runner.enqueue_llm(group_ref, priority=10):
+            elif await self.runner.enqueue_llm(
+                group_ref, since=since, until=until, priority=10
+            ):
                 enqueued.append("LLM称呼")
         if not enqueued:
             yield event.plain_result("该范围的分析任务已存在（或未入队）。")
             return
+        rng = (
+            f"\n范围: {_fmt_time(since)} → {_fmt_time(until)}"
+            if (since or until)
+            else "\n范围: 最近一个分析窗口"
+        )
         yield event.plain_result(
-            f"已入队分析任务：{'、'.join(enqueued)}（群 {row['group_name'] or row['group_id']}）\n"
-            f"状态用 /gs tasks 查看。"
+            f"已入队分析任务：{'、'.join(enqueued)}（群 {row['group_name'] or row['group_id']}）"
+            f"{rng}\n状态用 /gs tasks 查看。"
         )
 
     @gs.command("tasks")
@@ -860,7 +918,18 @@ class Main(Star):
             return
         args = self._args(event)
         if not args:
-            yield event.plain_result("用法: /gs reanalyze <群ID> [rule|llm|topic|event|all]")
+            yield event.plain_result(
+                "用法: /gs reanalyze <群ID> [rule|llm|topic|event|all]"
+                " [since=YYYY-MM-DD] [until=YYYY-MM-DD]"
+            )
+            return
+        try:
+            args, since, until = self._parse_range(args)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+        if not args:
+            yield event.plain_result("缺少群ID。")
             return
         row = await self._find_group(args[0])
         if not row:
@@ -908,30 +977,44 @@ class Main(Star):
                 return
         enqueued = []
         if mode in ("rule", "all"):
-            await self.runner.enqueue_rule(group_ref, priority=10)
+            await self.runner.enqueue_rule(
+                group_ref, since=since, until=until, priority=10
+            )
             enqueued.append("规则称呼")
         if mode in ("topic", "all"):
             await self.runner.enqueue_memory(
-                group_ref, kinds=(analysis_runner_mod.KIND_TOPIC_RULE,), priority=10
+                group_ref,
+                kinds=(analysis_runner_mod.KIND_TOPIC_RULE,),
+                since=since,
+                until=until,
+                priority=10,
             )
             enqueued.append("规则话题")
             if self.gateway is not None:
                 await self.runner.enqueue_memory(
                     group_ref,
                     kinds=(analysis_runner_mod.KIND_TOPIC_LLM,),
+                    since=since,
+                    until=until,
                     priority=10,
                     with_llm=True,
                 )
                 enqueued.append("LLM话题")
         if mode in ("event", "all"):
             await self.runner.enqueue_memory(
-                group_ref, kinds=(analysis_runner_mod.KIND_EVENT_RULE,), priority=10
+                group_ref,
+                kinds=(analysis_runner_mod.KIND_EVENT_RULE,),
+                since=since,
+                until=until,
+                priority=10,
             )
             enqueued.append("规则事件")
             if self.gateway is not None:
                 await self.runner.enqueue_memory(
                     group_ref,
                     kinds=(analysis_runner_mod.KIND_EVENT_LLM,),
+                    since=since,
+                    until=until,
                     priority=10,
                     with_llm=True,
                 )
@@ -945,7 +1028,12 @@ class Main(Star):
         yield event.plain_result(
             f"已清除旧结论：称呼 {purged}、话题 {purged_t}、事件 {purged_e} 条；"
             f"重新入队：{'、'.join(enqueued)}。"
-            f"\n提示词版本: {self._prompt_version()}"
+            + (
+                f"\n范围: {_fmt_time(since)} → {_fmt_time(until)}"
+                if (since or until)
+                else "\n范围: 最近一个分析窗口"
+            )
+            + f"\n提示词版本: {self._prompt_version()}"
         )
 
     @gs.command("alias")
@@ -1185,6 +1273,165 @@ class Main(Star):
                 f"{_fmt_time(r['occurred_at'])} {mark} {r['label']}"
                 + (f" — {r['detail']}" if r.get("detail") else "")
             )
+        yield event.plain_result("\n".join(lines))
+
+    # ---- Phase 6：归档 / 恢复 / 校验 -------------------------------
+
+    @property
+    def _archives_dir(self) -> Path:
+        return self.data_dir / "archives"
+
+    @gs.command("archive")
+    @filter.permission_type(ADMIN)
+    async def gs_archive(self, event: AstrMessageEvent):
+        """归档某月原始消息：/gs archive <YYYY-MM> [purge]
+        不带 purge 只生成归档文件（主库不动）；带 purge 才从主库删除该月消息
+        （分析结论保留，证据改指归档库）。"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if not args:
+            yield event.plain_result(
+                "用法: /gs archive <YYYY-MM> [purge]\n"
+                "例: /gs archive 2026-01（仅生成归档文件）\n"
+                "    /gs archive 2026-01 purge（归档并从主库移除）"
+            )
+            return
+        month = args[0]
+        do_purge = len(args) > 1 and args[1] == "purge"
+        try:
+            if do_purge:
+                info = await archives_ops.purge_month(
+                    self.db.conn, month=month, archives_dir=self._archives_dir
+                )
+            else:
+                info = await archives_ops.create_archive(
+                    self.db.conn, month=month, archives_dir=self._archives_dir
+                )
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        except Exception as e:
+            self.logger.exception("归档失败: %s", month)
+            yield event.plain_result(f"归档失败: {e}")
+            return
+        lines = [
+            f"【归档 {month}】 → {info['file']}",
+            f"消息 {info['messages']} 条 / 段 {info['segments']} / @ {info['mentions']}",
+            f"sha256: {info['sha256'][:16]}…",
+        ]
+        if do_purge:
+            lines.append(
+                f"已从主库移除 {info.get('deleted', 0)} 条消息；"
+                "分析结论保留，证据改指归档库（/gs verify 校验）"
+            )
+        else:
+            lines.append("主库未改动。确认无误后执行: "
+                         f"/gs archive {month} purge")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("archives")
+    @filter.permission_type(ADMIN)
+    async def gs_archives(self, event: AstrMessageEvent):
+        """列出归档清单"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        rows = await archives_ops.list_manifests(self.db.conn)
+        if not rows:
+            yield event.plain_result(
+                "暂无归档。使用 /gs archive <YYYY-MM> 创建（仅当前月份之前的数据）。"
+            )
+            return
+        lines = ["【归档清单】（新→旧）"]
+        for r in rows[:12]:
+            state = "已purge" if r["purged"] else "仅归档"
+            restored = "，已恢复" if r.get("restored_at") else ""
+            lines.append(
+                f"- {r['month']} {r['file']}：{r['messages']} 条"
+                f"（{state}{restored}）{_fmt_time(r['created_at'])}"
+            )
+        lines.append("校验: /gs verify [月份] ｜ 恢复: /gs unarchive <YYYY-MM>")
+        yield event.plain_result("\n".join(lines))
+
+    @gs.command("unarchive")
+    @filter.permission_type(ADMIN)
+    async def gs_unarchive(self, event: AstrMessageEvent):
+        """从归档恢复某月消息：/gs unarchive <YYYY-MM>
+        按 dedup_key 去重回灌，可断点续跑；恢复后自动回链证据。"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        args = self._args(event)
+        if not args:
+            yield event.plain_result("用法: /gs unarchive <YYYY-MM>（先 /gs archives 查看）")
+            return
+        try:
+            info = await archives_ops.restore_month(
+                self.db.conn, month=args[0], archives_dir=self._archives_dir
+            )
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+        except Exception as e:
+            self.logger.exception("恢复归档失败: %s", args[0])
+            yield event.plain_result(f"恢复失败: {e}")
+            return
+        yield event.plain_result(
+            f"【恢复 {info['month']}】新增 {info['restored']} 条"
+            f"（跳过已存在 {info['skipped']} 条）\n"
+            f"消息段 {info['segments']} / @ {info['mentions']}"
+            f" / 证据回链 {info['evidence_relinked']} 条"
+        )
+
+    @gs.command("verify")
+    @filter.permission_type(ADMIN)
+    async def gs_verify(self, event: AstrMessageEvent):
+        """数据完整性校验：/gs verify [YYYY-MM]
+        quick_check + 归档 sha256/行数对账 + SQLite 维护。"""
+        if not await self._ready():
+            yield event.plain_result("GroupScope 未就绪，详见日志。")
+            return
+        lines: list[str] = []
+        try:
+            ok = await self.db.quick_check()
+            lines.append(f"主库 quick_check: {ok}")
+        except Exception as e:
+            yield event.plain_result(f"主库完整性检查失败: {e}")
+            return
+        args = self._args(event)
+        manifests = await archives_ops.list_manifests(self.db.conn)
+        targets = [m for m in manifests if not args or m["month"] == args[0]]
+        if args and not targets:
+            yield event.plain_result(
+                f"未找到 {args[0]} 的归档记录。" + "\n".join(lines)
+            )
+            return
+        bad = 0
+        for m in targets:
+            try:
+                r = await archives_ops.verify_manifest(
+                    self.db.conn, month=m["month"], archives_dir=self._archives_dir
+                )
+            except Exception as e:
+                lines.append(f"- {m['month']}: 校验异常 {e}")
+                bad += 1
+                continue
+            if r["ok"]:
+                lines.append(
+                    f"- {m['month']}: OK（{r['messages']} 条，sha256 匹配，quick_check ok）"
+                )
+            else:
+                bad += 1
+                lines.append(
+                    f"- {m['month']}: 异常 {r.get('error') or r}"
+                )
+        await self.db.maintain()
+        size = await self.db.file_size()
+        lines.append(f"已执行维护（PRAGMA optimize + wal_checkpoint），库 {size / 1024 / 1024:.2f} MB")
+        if bad:
+            lines.append(f"⚠️ {bad} 个归档异常，请检查文件是否被移动/损坏。")
         yield event.plain_result("\n".join(lines))
 
     @gs.command("reload")

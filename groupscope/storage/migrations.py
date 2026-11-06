@@ -23,6 +23,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (2, _load(2)),  # Phase 2：人物与关系
     (3, _load(3)),  # Phase 3：称呼与语义分析
     (4, _load(4)),  # Phase 4：群体记忆
+    (5, _load(5)),  # Phase 6：月度归档 + 任务退避
 ]
 
 LATEST_VERSION = max(version for version, _ in MIGRATIONS)

@@ -54,7 +54,8 @@ class TaskQueue:
         if getattr(cur, "rowcount", 0) == 0:
             # 已存在：若是失败/取消状态则重新激活
             cur2 = await self.conn.execute(
-                "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=NULL"
+                "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=NULL,"
+                " not_before=NULL"
                 " WHERE kind=? AND dedup_key=? AND status IN (?,?)",
                 (STATUS_PENDING, now, kind, dedup_key, STATUS_FAILED, STATUS_CANCELLED),
             )
@@ -69,12 +70,18 @@ class TaskQueue:
     async def claim_kinds(
         self, kinds: tuple[str, ...] | None, limit: int = 1
     ) -> list[dict[str, Any]]:
-        """认领指定类型（或任意类型）的待处理任务，按优先级、创建时间排序。"""
+        """认领指定类型（或任意类型）的待处理任务，按优先级、创建时间排序。
+
+        ``not_before`` 是失败退避：未到期的任务本轮不认领。
+        """
         claimed: list[dict[str, Any]] = []
         now = int(time.time())
         for _ in range(max(1, limit)):
-            sql = "SELECT id FROM analysis_tasks WHERE status=?"
-            params: list[Any] = [STATUS_PENDING]
+            sql = (
+                "SELECT id FROM analysis_tasks WHERE status=?"
+                " AND (not_before IS NULL OR not_before <= ?)"
+            )
+            params: list[Any] = [STATUS_PENDING, now]
             if kinds:
                 sql += " AND kind IN (" + ",".join("?" for _ in kinds) + ")"
                 params.extend(kinds)
@@ -99,20 +106,31 @@ class TaskQueue:
 
     async def complete(self, task_id: int) -> None:
         await self.conn.execute(
-            "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=NULL WHERE id=?",
+            "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=NULL,"
+            " not_before=NULL WHERE id=?",
             (STATUS_DONE, int(time.time()), task_id),
         )
 
     async def fail(self, task: dict[str, Any], error: str, *, retry: bool = True) -> None:
-        """失败：未超重试上限则退回 pending，否则标记 failed。"""
+        """失败：未超重试上限则退回 pending（带指数退避），否则标记 failed。"""
         task_id = int(task["id"])
         attempts = int(task.get("attempts") or 0)
         max_attempts = int(task.get("max_attempts") or 3)
         now = int(time.time())
-        status = STATUS_PENDING if (retry and attempts < max_attempts) else STATUS_FAILED
+        retrying = retry and attempts < max_attempts
+        status = STATUS_PENDING if retrying else STATUS_FAILED
+        # 指数退避：30s、60s、120s… 上限 1 小时（避免坏任务空转打满循环）
+        backoff = min(3600, 30 * (2 ** max(0, attempts - 1))) if retrying else None
         await self.conn.execute(
-            "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=? WHERE id=?",
-            (status, now, error[:500], task_id),
+            "UPDATE analysis_tasks SET status=?, updated_at=?, last_error=?,"
+            " not_before=? WHERE id=?",
+            (
+                status,
+                now,
+                error[:500],
+                (now + backoff) if backoff else None,
+                task_id,
+            ),
         )
 
     async def cancel(self, task_id: int) -> None:
@@ -153,5 +171,16 @@ class TaskQueue:
         cur = await self.conn.execute(
             "UPDATE analysis_tasks SET status=?, updated_at=? WHERE status=?",
             (STATUS_PENDING, int(time.time()), STATUS_RUNNING),
+        )
+        return getattr(cur, "rowcount", 0) or 0
+
+    async def requeue_stale(self, seconds: int = 600) -> int:
+        """把滞留过久的 running 退回 pending（处理中进程被杀/卡死的兜底）。"""
+        cutoff = int(time.time()) - max(30, seconds)
+        cur = await self.conn.execute(
+            "UPDATE analysis_tasks SET status=?, claimed_at=NULL, updated_at=?,"
+            " last_error='任务滞留超时，已回收重试'"
+            " WHERE status=? AND claimed_at IS NOT NULL AND claimed_at < ?",
+            (STATUS_PENDING, int(time.time()), STATUS_RUNNING, cutoff),
         )
         return getattr(cur, "rowcount", 0) or 0

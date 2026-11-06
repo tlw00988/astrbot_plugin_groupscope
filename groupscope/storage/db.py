@@ -96,6 +96,25 @@ class Database:
         except OSError:
             return 0
 
+    async def maintain(self) -> None:
+        """周期性维护（Phase 6）：更新查询计划统计 + 被动 WAL checkpoint。
+
+        * ``PRAGMA optimize`` 只在有明显收益时重算统计，开销极小；
+        * ``wal_checkpoint(PASSIVE)`` 不阻塞读者与写入者，仅在空闲时合并 WAL。
+        """
+        if self._conn is None:
+            return
+        try:
+            await asyncio.wait_for(self.conn.execute("PRAGMA optimize"), 5.0)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(
+                self.conn.execute("PRAGMA wal_checkpoint(PASSIVE)"), 5.0
+            )
+        except Exception:
+            pass
+
     # ---- 状态键值 -------------------------------------------------
 
     async def set_state(self, key: str, value: str) -> None:

@@ -59,6 +59,7 @@ class AnalysisRunner:
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._last_auto = 0.0
+        self._last_maintain = 0.0
 
     # -- 生命周期 ---------------------------------------------------
 
@@ -92,6 +93,12 @@ class AnalysisRunner:
     async def _loop(self) -> None:
         while not self._stopping.is_set():
             try:
+                await self._maintain()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self.log.exception("周期维护失败")
+            try:
                 await self._auto_enqueue()
             except asyncio.CancelledError:
                 break
@@ -113,6 +120,17 @@ class AnalysisRunner:
                     await asyncio.wait_for(self._stopping.wait(), self.tick)
             except (asyncio.TimeoutError, TimeoutError):
                 pass
+
+    async def _maintain(self) -> None:
+        """每小时一次的长期运行维护：回收滞留任务 + SQLite 维护。"""
+        now = time.time()
+        if now - self._last_maintain < 3600:
+            return
+        self._last_maintain = now
+        requeued = await self.queue.requeue_stale()
+        if requeued:
+            self.log.warning("回收滞留过久的分析任务 %s 条", requeued)
+        await self.db.maintain()
 
     async def _auto_enqueue(self, force: bool = False) -> int:
         """为活跃群自动入队分析任务（按时间桶去重，避免重复堆积）。
@@ -237,10 +255,10 @@ class AnalysisRunner:
         return tasks[0] if tasks else None
 
     async def _requeue(self, task: dict[str, Any], error: str) -> None:
-        """限流时把任务退回 pending（不消耗重试次数）。"""
+        """限流时把任务退回 pending（不消耗重试次数、不进入退避）。"""
         await self.db.conn.execute(
             "UPDATE analysis_tasks SET status=?, claimed_at=NULL, updated_at=?,"
-            " last_error=? WHERE id=? AND status=?",
+            " last_error=?, not_before=NULL WHERE id=? AND status=?",
             (
                 STATUS_PENDING,
                 int(time.time()),
