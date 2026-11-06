@@ -135,15 +135,24 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 ```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python astrbot pytest pytest-timeout
-.venv/bin/python -m pytest tests -q        # 单测
+.venv/bin/python -m pytest tests -q        # 单测（40 项）
 
-# 压力与稳定性测试（隔离的临时 ASTRBOT_ROOT，不碰真实数据）
+# 冒烟：全新 ASTRBOT_ROOT（脚本自动建临时目录，不碰真实数据）
+.venv/bin/python tools/smoke_phase5.py     # 12 个扩展 API + 路由/参数校验
+.venv/bin/python tools/smoke_phase6.py     # 归档→purge→恢复→回链→退避→维护
+
+# 压力与稳定性测试（隔离的临时 ASTRBOT_ROOT）
 .venv/bin/python tools/stress_test.py --count 10000
 .venv/bin/python tools/stress_test.py --count 2000 --archive   # 附带归档全链路演练
+
+# 端到端集成测试：真 AstrBot + 假 OneBot 逆向 WS + LLM 陷阱服务
+.venv/bin/python tools/integration_test.py            # R1 零 LLM 断言 + R2 真实 LLM 链路
+.venv/bin/python tools/integration_test.py --keep     # 保留测试实例便于排查
 ```
 
 压测报告含吞吐、队列丢弃、库体积、事件循环延迟（max/p99）与 `quick_check`；
-任一断言失败以退出码 1 结束。集成测试方法见各阶段交付报告（`docs/`）。
+集成测试含采集/权限/回复/LLM/WebUI/停机断言：任一断言失败以退出码 1 结束。
+各类测试的完整方法与**实测结果**见 `docs/final-report.md`。
 
 ## 许可
 

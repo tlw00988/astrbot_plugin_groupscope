@@ -21,6 +21,8 @@ from typing import Any
 
 import aiosqlite
 
+from ..storage import tx
+
 from ..storage.db import DatabaseError
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -144,7 +146,7 @@ async def create_archive(
         # ATTACH 主库（必须在事务外），随后集合式拷贝
         escaped = str(source_path).replace("'", "''")
         await arch.execute(f"ATTACH DATABASE '{escaped}' AS main_arch")
-        await arch.execute("BEGIN IMMEDIATE")
+        await tx.begin(arch)
         cur = await arch.execute(
             "INSERT INTO messages(id, platform_id, platform_name, group_ref,"
             " group_raw_id, message_id, dedup_key, sender_ref, sender_raw_id,"
@@ -180,11 +182,11 @@ async def create_archive(
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (month, str(int(time.time())), str(source_path)),
         )
-        await arch.execute("COMMIT")
+        await tx.commit(arch)
         await arch.execute("DETACH DATABASE main_arch")
     except BaseException:
         try:
-            await arch.execute("ROLLBACK")
+            await tx.rollback(arch)
         except Exception:
             pass
         try:
@@ -253,7 +255,7 @@ async def purge_month(
         raise DatabaseError(f"归档文件缺失: {manifest['file']}（先执行 /gs archive {month}）")
 
     now = int(time.time())
-    await conn.execute("BEGIN IMMEDIATE")
+    await tx.begin(conn)
     try:
         # 1) 先把证据指针搬到 archived_evidence（分析行不删；OR IGNORE 幂等）
         await conn.execute(
@@ -289,10 +291,10 @@ async def purge_month(
         await conn.execute(
             "UPDATE archive_manifest SET purged=1 WHERE month=?", (month,)
         )
-        await conn.execute("COMMIT")
+        await tx.commit(conn)
     except BaseException:
         try:
-            await conn.execute("ROLLBACK")
+            await tx.rollback(conn)
         except Exception:
             pass
         raise

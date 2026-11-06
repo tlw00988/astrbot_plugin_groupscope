@@ -14,6 +14,8 @@ from typing import Any
 
 import aiosqlite
 
+from ..storage import tx
+
 SOURCE_RULE = "rule"
 SOURCE_LLM = "llm"
 
@@ -40,7 +42,7 @@ class MemoryStore:
         first_seen = int(topic.get("first_seen") or now)
         last_seen = int(topic.get("last_seen") or now)
         keywords = topic.get("keywords") or []
-        await self.conn.execute("BEGIN IMMEDIATE")
+        await tx.begin(self.conn)
         try:
             cur = await self.conn.execute(
                 "INSERT INTO topics(group_ref, title, summary, keywords_json,"
@@ -78,7 +80,7 @@ class MemoryStore:
             ).fetchone()
             topic_id = int(row["id"]) if row else None
             if topic_id is None:
-                await self.conn.execute("COMMIT")
+                await tx.commit(self.conn)
                 return None
 
             for msg_id in topic.get("evidence_msg_ids") or []:
@@ -116,9 +118,9 @@ class MemoryStore:
                     str(topic.get("summary") or "")[:200] or None,
                 ),
             )
-            await self.conn.execute("COMMIT")
+            await tx.commit(self.conn)
         except BaseException:
-            await self.conn.execute("ROLLBACK")
+            await tx.rollback(self.conn)
             raise
         return topic_id
 
@@ -139,7 +141,7 @@ class MemoryStore:
         now = int(time.time())
         first_seen = int(event.get("first_seen") or now)
         last_seen = int(event.get("last_seen") or now)
-        await self.conn.execute("BEGIN IMMEDIATE")
+        await tx.begin(self.conn)
         try:
             await self.conn.execute(
                 "INSERT INTO events(group_ref, title, summary, event_kind, first_seen,"
@@ -177,7 +179,7 @@ class MemoryStore:
             ).fetchone()
             event_id = int(row["id"]) if row else None
             if event_id is None:
-                await self.conn.execute("COMMIT")
+                await tx.commit(self.conn)
                 return None
 
             for ev in event.get("evidence") or []:
@@ -227,9 +229,9 @@ class MemoryStore:
                     str(event.get("summary") or "")[:200] or None,
                 ),
             )
-            await self.conn.execute("COMMIT")
+            await tx.commit(self.conn)
         except BaseException:
-            await self.conn.execute("ROLLBACK")
+            await tx.rollback(self.conn)
             raise
         return event_id
 

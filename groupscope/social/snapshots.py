@@ -13,6 +13,8 @@ from typing import Any
 
 import aiosqlite
 
+from ..storage import tx
+
 WINDOWS: dict[str, int] = {
     "day": 86400,
     "week": 604800,
@@ -125,7 +127,7 @@ async def _compute_one_window(
     msg_counts = {int(r["sender_ref"]): int(r["c"]) for r in await cur.fetchall()}
 
     now = int(time.time())
-    await conn.execute("BEGIN IMMEDIATE")
+    await tx.begin(conn)
     try:
         for row in pairs:
             frm = int(row["from_member"])
@@ -161,9 +163,9 @@ async def _compute_one_window(
                     now,
                 ),
             )
-        await conn.execute("COMMIT")
+        await tx.commit(conn)
     except BaseException:
-        await conn.execute("ROLLBACK")
+        await tx.rollback(conn)
         raise
 
 

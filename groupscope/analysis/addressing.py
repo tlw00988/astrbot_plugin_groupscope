@@ -7,6 +7,8 @@ from typing import Any
 
 import aiosqlite
 
+from ..storage import tx
+
 SOURCE_RULE = "rule"
 SOURCE_LLM = "llm"
 SOURCE_MANUAL = "manual"
@@ -34,7 +36,7 @@ class AddressingStore:
             return 0
         now = int(time.time())
         written = 0
-        await self.conn.execute("BEGIN IMMEDIATE")
+        await tx.begin(self.conn)
         try:
             for row in rows:
                 from_raw = row.get("from_raw_id")
@@ -74,9 +76,9 @@ class AddressingStore:
                 )
                 if getattr(cur, "rowcount", 0):
                     written += 1
-            await self.conn.execute("COMMIT")
+            await tx.commit(self.conn)
         except BaseException:
-            await self.conn.execute("ROLLBACK")
+            await tx.rollback(self.conn)
             raise
         return written
 

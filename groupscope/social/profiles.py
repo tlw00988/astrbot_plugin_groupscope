@@ -7,6 +7,8 @@ from typing import Any
 
 import aiosqlite
 
+from ..storage import tx
+
 
 async def member_search(
     conn: aiosqlite.Connection, keyword: str, limit: int = 20
@@ -114,7 +116,7 @@ async def merge_members(
         if await cur.fetchone() is None:
             raise ValueError(f"成员不存在: {mid}")
 
-    await conn.execute("BEGIN IMMEDIATE")
+    await tx.begin(conn)
     try:
         await conn.execute(
             "INSERT INTO member_merges(src_member, dst_member, operator, note, created_at)"
@@ -175,9 +177,9 @@ async def merge_members(
         await conn.execute("DELETE FROM member_group WHERE member_id = ?", (src_id,))
         # 7) 删除源身份（其外键引用已全部迁移）
         await conn.execute("DELETE FROM members WHERE id = ?", (src_id,))
-        await conn.execute("COMMIT")
+        await tx.commit(conn)
     except BaseException:
-        await conn.execute("ROLLBACK")
+        await tx.rollback(conn)
         raise
 
     # 发言计数以 messages 表为准重算（合并后 src 的消息已归属 dst）

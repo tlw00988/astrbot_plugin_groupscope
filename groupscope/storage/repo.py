@@ -7,6 +7,8 @@ from typing import Any
 
 import aiosqlite
 
+from . import tx
+
 from ..capture.models import NormalizedMessage
 from ..social.extract import dedupe_rows, extract_interactions
 
@@ -129,7 +131,7 @@ async def insert_batch(conn: aiosqlite.Connection, items: list) -> int:
     if not items:
         return 0
     inserted = 0
-    await conn.execute("BEGIN IMMEDIATE")
+    await tx.begin(conn)
     try:
         member_cache: dict[tuple[str, str], int | None] = {}
         for item in items:
@@ -266,10 +268,10 @@ async def insert_batch(conn: aiosqlite.Connection, items: list) -> int:
                     item.received_at,
                     count_one=False,
                 )
-        await conn.execute("COMMIT")
+        await tx.commit(conn)
     except BaseException:
         try:
-            await conn.execute("ROLLBACK")
+            await tx.rollback(conn)
         except Exception:
             pass
         raise
@@ -437,14 +439,14 @@ async def retention_purge(conn: aiosqlite.Connection, days: int) -> int:
     if days <= 0:
         return 0
     cutoff = int(time.time()) - days * 86400
-    await conn.execute("BEGIN IMMEDIATE")
+    await tx.begin(conn)
     try:
         cur = await conn.execute(
             "DELETE FROM messages WHERE received_at < ?", (cutoff,)
         )
         deleted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-        await conn.execute("COMMIT")
+        await tx.commit(conn)
     except BaseException:
-        await conn.execute("ROLLBACK")
+        await tx.rollback(conn)
         raise
     return deleted
