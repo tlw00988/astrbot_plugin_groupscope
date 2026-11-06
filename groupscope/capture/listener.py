@@ -46,12 +46,17 @@ class MessageListener:
         sender_raw_id = str(getattr(sender, "user_id", "") or "") or None
 
         is_notice, _ = notice_info(msg)
+        try:
+            session_id = str(event.get_session_id() or "") or None
+        except Exception:  # noqa: BLE001 - 个别事件没有会话概念
+            session_id = None
         if not self.policy.allow(
             platform_name=platform_name,
             platform_id=platform_id,
             group_raw_id=str(group_raw_id) if group_raw_id else None,
             sender_raw_id=sender_raw_id,
             is_notice=is_notice,
+            session_id=session_id,
         ):
             if self._rejected:
                 self._rejected()

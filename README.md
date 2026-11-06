@@ -42,9 +42,9 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `capture_enabled` | `true` | 总开关，关闭后保留历史、停止记录 |
-| `group_whitelist` | `[]` | **留空 = 不采集任何群**。格式 `平台:群ID` 或仅 `群ID` |
-| `group_blacklist` | `[]` | 黑名单优先于白名单 |
-| `excluded_users` | `[]` | 排除的发送者 |
+| `group_whitelist` | `[]` | **留空 = 不采集任何群**。三种写法：UMO `default:GroupMessage:1013637348`（AstrBot 自带白名单同款，可直接粘贴）、`平台:群ID`（如 `aiocqhttp:123456789`）、仅 `群ID`（匹配所有平台） |
+| `group_blacklist` | `[]` | 黑名单优先于白名单，格式同白名单 |
+| `excluded_users` | `[]` | 排除的发送者，格式同白名单（UMO `default:FriendMessage:1013637348` / `平台:用户ID` / 仅 `用户ID`） |
 | `record_notices` | `true` | 记录撤回/戳一戳等平台可观测通知（不做推断） |
 | `attachment_policy` | `metadata_only` | `none` / `metadata_only` / `download_if_small` |
 | `batch_max_rows` / `batch_max_interval_ms` | `100` / `500` | 写库批量阈值 |
@@ -135,7 +135,7 @@ ln -s /path/to/astrbot_plugin_groupscope ~/.astrbot/data/plugins/astrbot_plugin_
 ```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python astrbot pytest pytest-timeout
-.venv/bin/python -m pytest tests -q        # 单测（40 项）
+.venv/bin/python -m pytest tests -q        # 单测（43 项）
 
 # 冒烟：全新 ASTRBOT_ROOT（脚本自动建临时目录，不碰真实数据）
 .venv/bin/python tools/smoke_phase5.py     # 12 个扩展 API + 路由/参数校验

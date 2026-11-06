@@ -4,15 +4,30 @@ from __future__ import annotations
 
 from ..config import CaptureSettings
 
+# AstrBot 的 MessageType 取值（``astrbot.core.platform.message_type``），
+# 用于识别 unified_msg_origin（UMO）中间那一段。
+_UMO_MESSAGE_TYPES = frozenset({"GroupMessage", "FriendMessage", "OtherMessage"})
+
 
 def split_entry(entry: str) -> tuple[str | None, str]:
-    """``platform:id`` -> ``(platform, id)``；纯 id -> ``(None, id)``。"""
-    if ":" in entry:
-        platform, _, value = entry.partition(":")
-        platform = platform.strip() or None
-        value = value.strip()
-        return platform, value
-    return None, entry.strip()
+    """解析白/黑名单条目，支持三种写法（第 1 种可从 WebUI 直接粘贴）：
+
+    1. **UMO** —— AstrBot 自带白名单用的 ``平台:消息类型:会话ID``，例如
+       日志与 WebUI「访问控制 → 白名单」里显示的
+       ``default:GroupMessage:1013637348``，解析为 ``("default", "1013637348")``：
+       去掉中间的消息类型后与写法 2 等价，末段就是群/用户 ID。
+    2. ``platform:id`` -> ``(platform, id)``
+    3. 纯 ``id``      -> ``(None, id)``（匹配所有平台）
+    """
+    text = entry.strip()
+    if text.count(":") >= 2:
+        platform, message_type, value = (p.strip() for p in text.split(":", 2))
+        if message_type in _UMO_MESSAGE_TYPES:
+            return platform or None, value
+    if ":" in text:
+        platform, _, value = text.partition(":")
+        return (platform.strip() or None), value.strip()
+    return None, text
 
 
 class CapturePolicy:
@@ -39,17 +54,25 @@ class CapturePolicy:
         group_raw_id: str | None,
         sender_raw_id: str | None,
         is_notice: bool,
+        session_id: str | None = None,
     ) -> bool:
-        """白名单准入判定（任何一项不满足即拒绝）。"""
+        """白名单准入判定（任何一项不满足即拒绝）。
+
+        ``session_id`` 是会话 ID（= UMO 的末段）：从 AstrBot 白名单粘贴来的
+        条目末段是它，某些平台上它与群 ID 不同，因此两个都参与比对。
+        """
         if not self.settings.capture_enabled:
             return False
         if not group_raw_id:  # Phase 1 只采集群聊
             return False
         if is_notice and not self.settings.record_notices:
             return False
-        if self._match(self._blacklist, platform_name, platform_id, group_raw_id):
+        group_keys = (group_raw_id, session_id)
+        if self._match(self._blacklist, platform_name, platform_id, *group_keys):
             return False
-        if not self._match(self._whitelist, platform_name, platform_id, group_raw_id):
+        if not self._match(
+            self._whitelist, platform_name, platform_id, *group_keys
+        ):
             return False
         if (platform_id, group_raw_id) in self.paused:
             return False
@@ -64,10 +87,14 @@ class CapturePolicy:
         entries: list[tuple[str | None, str]],
         platform_name: str,
         platform_id: str,
-        value: str,
+        *values: str | None,
     ) -> bool:
+        """任一候选值命中即算匹配；限定了平台时还必须平台一致。"""
+        wanted = {v for v in values if v}
+        if not wanted:
+            return False
         for plat, entry_value in entries:
-            if entry_value != value:
+            if entry_value not in wanted:
                 continue
             if plat is None or plat in (platform_name, platform_id):
                 return True

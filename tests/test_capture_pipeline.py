@@ -89,6 +89,65 @@ def test_notice_switch_and_pause():
 
 
 # ---------------------------------------------------------------------
+# UMO（AstrBot 自带白名单的写法，可直接粘贴）
+# ---------------------------------------------------------------------
+
+
+def test_umo_whitelist_can_be_pasted_directly():
+    """``default:GroupMessage:1013637348`` 这种 UMO 可直接进白名单。"""
+    policy = _policy(group_whitelist=["default:GroupMessage:900001"])
+
+    def allow(**kw):
+        base = dict(
+            platform_name="aiocqhttp",
+            platform_id="default",
+            group_raw_id="900001",
+            sender_raw_id="1001",
+            is_notice=False,
+        )
+        base.update(kw)
+        return policy.allow(**base)
+
+    assert allow() is True
+    assert allow(group_raw_id="900002") is False  # 不在白名单
+    # 平台限定生效：同群号、别的平台不放行
+    assert allow(platform_id="aiocqhttp-1") is False
+    assert allow(platform_id="other", platform_name="aiocqhttp") is False
+
+
+def test_umo_entry_matches_session_id_when_it_differs():
+    """有的平台会话 ID ≠ 群 ID，UMO 末段是会话 ID，也要能命中。"""
+    policy = _policy(group_whitelist=["aiocqhttp:GroupMessage:group_900001"])
+
+    def allow(**kw):
+        base = dict(
+            platform_name="aiocqhttp",
+            platform_id="aiocqhttp-1",
+            group_raw_id="900001",
+            sender_raw_id="1001",
+            is_notice=False,
+        )
+        base.update(kw)
+        return policy.allow(**base)
+
+    assert allow(session_id="group_900001") is True
+    assert allow() is False  # 没有会话 ID 时不误命中
+    assert allow(session_id="group_900002") is False
+
+
+def test_umo_blacklist_and_excluded_users():
+    policy = _policy(
+        group_whitelist=["900001"],
+        group_blacklist=["aiocqhttp:GroupMessage:900001"],
+    )
+    assert _allow(policy, group="900001") is False  # 黑名单优先
+
+    ex = _policy(excluded_users=["aiocqhttp:FriendMessage:1001"])
+    assert _allow(ex, sender="1001") is False
+    assert _allow(ex, sender="1002") is True
+
+
+# ---------------------------------------------------------------------
 # 监听器
 # ---------------------------------------------------------------------
 

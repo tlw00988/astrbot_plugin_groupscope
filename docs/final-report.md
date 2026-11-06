@@ -12,7 +12,7 @@
 - **全部验证手段通过**：
   | 手段 | 实测结果 |
   | --- | --- |
-  | 单元测试 `pytest tests -q` | **40 passed**（0.5 s） |
+  | 单元测试 `pytest tests -q` | **43 passed**（0.5 s） |
   | 冒烟 `tools/smoke_phase5.py` | **PHASE5 SMOKE OK: 13 ok endpoints** |
   | 冒烟 `tools/smoke_phase6.py` | **PHASE6 SMOKE OK**（归档→purge→恢复→回链→退避→维护全链路） |
   | 压测 `tools/stress_test.py --count 5000 --archive` | **4,014 msg/s**、事件循环延迟 max 0.9 ms、`write_errors=0`、`quick_check=ok`、归档全链路 ok（1 万条时 4,244 msg/s、延迟 max 0.5 ms） |
@@ -41,7 +41,7 @@
 | 运维 | `groupscope/ops/{__init__,archives,backup,export}.py` |
 | WebUI 后端 | `groupscope/web/{__init__,api}.py` |
 | WebUI 视图 | `views/overview/index.html`、`views/relations/index.html`、`views/members/index.html`、`views/search/index.html`、`views/memory/index.html` |
-| 单元测试 | `tests/conftest.py`、`tests/test_serializer.py`(11)、`tests/test_storage.py`(10)、`tests/test_capture_pipeline.py`(12)、`tests/test_phase6.py`(4)、`tests/test_tx_lock.py`(3) |
+| 单元测试 | `tests/conftest.py`、`tests/test_serializer.py`(11)、`tests/test_storage.py`(10)、`tests/test_capture_pipeline.py`(15)、`tests/test_phase6.py`(4)、`tests/test_tx_lock.py`(3) |
 | 测试工具 | `tools/stress_test.py`、`tools/smoke_phase5.py`、`tools/smoke_phase6.py`、`tools/integration_test.py` |
 
 行数统计：`groupscope/` + `main.py` = **7,026 行**；`tests/` + `tools/` = **3,080 行**；`views/*/index.html` = **1,138 行**。
@@ -129,7 +129,8 @@
 
 ### 5.1 配置 `_conf_schema.json`（21 项，全部走 AstrBot 管理界面）
 
-采集域：`capture_enabled(true)`、`group_whitelist([]，留空=不采集)`、`group_blacklist([])`、`excluded_users([])`、`record_notices(true)`、`attachment_policy(metadata_only)`、`attachment_max_bytes(2097152)`
+采集域：`capture_enabled(true)`、`group_whitelist([]，留空=不采集)`、`group_blacklist([])`、`excluded_users([])`、`record_notices(true)`、`attachment_policy(metadata_only)`、`attachment_max_bytes(2097152)`。
+白名单/黑名单/排除名单的条目支持三种写法：**UMO**（AstrBot 自带白名单同款，如 `default:GroupMessage:1013637348`，可直接粘贴）、`平台:群ID`（如 `aiocqhttp:123456789`）、纯 `群ID`（匹配所有平台）。
 写入域：`batch_max_rows(100)`、`batch_max_interval_ms(500)`、`queue_maxsize(10000)`
 长期域：`log_retention_days(0)`、`backup_auto(false)`、`backup_keep(7)`、`log_detail(false)`
 分析域：`analysis_enabled(true)`、`llm_provider_id("")`、`analysis_concurrency(1)`、`analysis_interval_ms(1500)`、`analysis_daily_limit(200)`、`analysis_window_hours(24)`、`analysis_batch_size(3)`
@@ -191,18 +192,18 @@ astrbot run
 
 ## 7. 测试方法与实测结果
 
-### 7.1 单元测试 —— **40 passed**
+### 7.1 单元测试 —— **43 passed**
 
 ```bash
 cd astrbot_plugin_groupscope && .venv/bin/python -m pytest tests -q
-# 40 passed, 1 warning in 0.47s
+# 43 passed, 1 warning in 0.51s
 ```
 
 | 文件 | 项数 | 覆盖 |
 | --- | --- | --- |
 | `tests/test_serializer.py` | 11 | 消息段/`@`/`Reply` 抽取、base64 洗除、notice 指纹、异常事件不抛出 |
 | `tests/test_storage.py` | 10 | 迁移幂等与重开库版本、写入去重与计数、查询、保留期清理、备份校验、JSON/CSV 导出 |
-| `tests/test_capture_pipeline.py` | 12 | 隐私白/黑名单/排除、有界队列丢弃计数、批量写入、停机排空、异常隔离 |
+| `tests/test_capture_pipeline.py` | 15 | 隐私白/黑名单/排除（含 UMO 写法）、有界队列丢弃计数、批量写入、停机排空、异常隔离 |
 | `tests/test_phase6.py` | 4 | 归档→purge→恢复→回链、退避与 `requeue_stale`、维护、范围解析 |
 | `tests/test_tx_lock.py` | 3 | 事务串行化回归（见 §7.5） |
 
@@ -329,4 +330,4 @@ f974369  事务串行化修复（tx 锁，杜绝嵌套 BEGIN）+ 端到端集成
 
 ## 11. 一句话结论
 
-**Phase 0–6 功能全部完成并通过 4 类验证（单测 40 / 冒烟 2 条链路 / 压测 4,014 msg/s / 集成 44 断言）；集成测试额外揪出并修复了一个真实并发写入缺陷；未实现项（附件下载、多平台实测、硬崩溃演练、浏览器人工点验、FTS 检索、自动身份合并等 11 条）已在 §8 如实列出。**
+**Phase 0–6 功能全部完成并通过 4 类验证（单测 43 / 冒烟 2 条链路 / 压测 4,014 msg/s / 集成 44 断言）；集成测试额外揪出并修复了一个真实并发写入缺陷；未实现项（附件下载、多平台实测、硬崩溃演练、浏览器人工点验、FTS 检索、自动身份合并等 11 条）已在 §8 如实列出。**

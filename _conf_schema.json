@@ -9,20 +9,20 @@
     "description": "采集群白名单",
     "type": "list",
     "default": [],
-    "hint": "只采集白名单内的群。格式：平台名:群ID（如 aiocqhttp:123456789）或仅群ID（匹配所有平台）。留空表示不采集任何群。",
+    "hint": "只采集白名单内的群，留空 = 不采集任何群。支持三种写法：① UMO（AstrBot 自带白名单同款，可直接粘贴，如 default:GroupMessage:1013637348）；② 平台名:群ID（如 aiocqhttp:123456789）；③ 仅群ID（匹配所有平台）。",
     "obvious_hint": true
   },
   "group_blacklist": {
     "description": "采集黑名单",
     "type": "list",
     "default": [],
-    "hint": "黑名单优先于白名单，格式同白名单。"
+    "hint": "黑名单优先于白名单，格式同白名单（UMO / 平台:群ID / 仅群ID 均可）。"
   },
   "excluded_users": {
     "description": "排除的发送者",
     "type": "list",
     "default": [],
-    "hint": "这些用户的消息不会被记录。格式：平台名:用户ID 或 仅用户ID。"
+    "hint": "这些用户的消息不会被记录。格式：UMO（如 default:FriendMessage:1013637348）、平台名:用户ID 或 仅用户ID。"
   },
   "record_notices": {
     "description": "记录可观测通知事件",

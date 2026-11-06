@@ -155,6 +155,8 @@ def test_queries_recent_search_group(db: Database):
     found = run(repo.find_group(db.conn, "900001"))
     assert found and found["id"] == groups[0]["id"]
     assert run(repo.find_group(db.conn, "aiocqhttp:900001"))["id"] == groups[0]["id"]
+    # UMO 写法（AstrBot 自带白名单同款）也能直接查
+    assert run(repo.find_group(db.conn, "aiocqhttp:GroupMessage:900001"))["id"] == groups[0]["id"]
     assert run(repo.find_group(db.conn, "nope")) is None
 
     recent = run(repo.recent_messages(db.conn, None, 3))
